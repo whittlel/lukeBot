@@ -110,7 +110,8 @@ pip install -r requirements.txt
 - L298N #1 (Left side: Front-left, Rear-left):
   - IN1→2, IN2→3, IN3→4, IN4→5, ENA→6, ENB→7
 - L298N #2 (Right side: Front-right, Rear-right):
-  - IN1→8, IN2→9, IN3→10, IN4→11, ENA→12, ENB→13
+  - IN1→8, IN2→9, IN3→10, IN4→11, ENA→12, ENB→44
+  - NOTE: Pin 13 avoided due to built-in LED interference with PWM
 
 ### 4. Configuration
 
