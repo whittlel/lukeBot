@@ -1,0 +1,27 @@
+# DepthAI v2 for OAK-D camera (proven to work best)
+depthai>=2.27.0,<3.0.0
+
+# OpenCV for SLAM and image processing
+opencv-python>=4.5.0
+opencv-contrib-python>=4.5.0
+
+# Image processing
+Pillow>=9.0.0
+numpy>=1.19.0
+
+# Arduino serial communication
+pyserial>=3.5
+
+# Configuration files
+pyyaml>=6.0
+
+# Visualization
+matplotlib>=3.3.0
+
+# Utilities
+requests>=2.25.0
+blobconverter>=1.0.0
+
+# GUI (for test scripts)
+# Note: tkinter is usually included with Python, but may need to install on some systems
+

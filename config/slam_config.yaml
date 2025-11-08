@@ -1,0 +1,110 @@
+# SLAM Configuration
+# Visual SLAM using stereo camera data
+
+slam:
+  # Visual Odometry Settings
+  visual_odometry:
+    # Feature detector
+    detector_type: "ORB"  # Options: ORB, SIFT, SURF
+    max_features: 1000    # Maximum number of features to detect
+    quality_level: 0.01   # Quality level for feature detection
+    
+    # Feature matcher
+    matcher_type: "BF"    # Brute Force matcher
+    norm_type: "NORM_HAMMING"  # For ORB (binary features)
+    ratio_test: 0.7      # Lowe's ratio test threshold
+    
+    # RANSAC for outlier removal
+    ransac_threshold: 1.0  # Pixel threshold for RANSAC
+    ransac_confidence: 0.99
+    ransac_max_iterations: 2000
+  
+  # Stereo Processing
+  stereo:
+    # Stereo matching parameters
+    min_disparity: 0
+    num_disparities: 64
+    block_size: 15
+    uniqueness_ratio: 10
+    speckle_window_size: 100
+    speckle_range: 32
+    
+    # Depth filtering
+    min_depth: 0.1   # meters
+    max_depth: 10.0  # meters
+  
+  # Mapping Settings
+  mapping:
+    # Map type
+    map_type: "occupancy_grid"  # Options: occupancy_grid, point_cloud, hybrid
+    
+    # Occupancy grid settings
+    grid_resolution: 0.05  # meters per cell (5cm)
+    grid_size: [100, 100]  # Grid size in cells [width, height]
+    grid_origin: [50, 50]  # Origin position in grid cells
+    
+    # Probabilistic mapping
+    prob_free: 0.4    # Probability of free space
+    prob_occupied: 0.6 # Probability of occupied space
+    prob_unknown: 0.5 # Probability of unknown space
+    
+    # Point cloud settings
+    point_cloud:
+      voxel_size: 0.05  # Voxel size for downsampling (meters)
+      max_points: 100000  # Maximum number of points
+  
+  # Loop Closure
+  loop_closure:
+    enabled: true
+    detection_method: "visual"  # Visual bag-of-words
+    min_loop_distance: 5.0  # Minimum distance (meters) before checking for loop
+    loop_threshold: 0.3     # Similarity threshold for loop detection
+  
+  # Pose Estimation
+  pose:
+    # Initial pose (robot starts at origin)
+    initial_pose: [0.0, 0.0, 0.0]  # [x, y, theta] in meters and radians
+    
+    # Pose uncertainty
+    pose_covariance: [0.01, 0.01, 0.01]  # [x, y, theta] variance
+  
+  # Performance Settings
+  performance:
+    # Processing rate
+    process_rate: 10  # Hz (frames per second to process)
+    
+    # Keyframe selection
+    keyframe_interval: 5  # Process every Nth frame
+    min_movement: 0.1     # Minimum movement (meters) before new keyframe
+    
+    # Threading
+    use_threading: true
+    num_threads: 2  # Number of threads for processing
+
+# Map Storage
+storage:
+  # Save settings
+  auto_save: true
+  save_interval: 60  # seconds
+  map_directory: "data/maps"
+  
+  # File formats
+  map_format: "yaml"  # Options: yaml, pickle, json
+  point_cloud_format: "ply"  # Options: ply, pcd
+  
+  # Map naming
+  map_name_prefix: "lukebot_map"
+  timestamp_format: "%Y%m%d_%H%M%S"
+
+# Visualization
+visualization:
+  enabled: true
+  update_rate: 5  # Hz
+  show_features: true
+  show_trajectory: true
+  show_map: true
+  
+  # Display settings
+  window_size: [800, 600]
+  colormap: "viridis"  # For depth visualization
+

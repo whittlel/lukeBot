@@ -1,0 +1,43 @@
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+data/logs/*.log
+data/maps/*.yaml
+data/maps/*.png
+data/maps/*.ply
+data/maps/*.pcd
+data/calibration/*.npz
+data/calibration/*.yaml
+
+# Keep directory structure
+!data/logs/.gitkeep
+!data/maps/.gitkeep
+!data/calibration/.gitkeep
+

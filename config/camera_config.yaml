@@ -1,0 +1,56 @@
+# OAK-D IOT-75 Camera Configuration
+# Using DepthAI v2 API
+
+camera:
+  # RGB Camera (CAM_A) settings
+  rgb:
+    resolution: "1080p"  # THE_1080_P
+    fps: 30
+    preview_size: [640, 640]  # Model input size for YOLO
+    video_size: [1280, 720]   # Display size
+    color_order: "BGR"
+  
+  # Stereo Cameras (CAM_B, CAM_C) settings
+  stereo:
+    resolution: "400p"  # THE_400_P
+    fps: 30
+    left_socket: "CAM_B"
+    right_socket: "CAM_C"
+  
+  # Depth settings
+  depth:
+    preset: "HIGH_DENSITY"
+    left_right_check: true
+    subpixel: false
+    depth_align: "CAM_A"  # Align depth to RGB camera
+    confidence_threshold: 200
+
+# YOLO Detection Configuration
+yolo:
+  # Model path (relative to project root or absolute)
+  # Models should be in .blob format (OpenVINO compiled)
+  model_path: "data/models/yolov6n/yolov6n_openvino_2022.1_6shave.blob"  # Default model
+  
+  # Alternative models available:
+  # - ../oakd/models/yolov8s.json
+  # - ../oakd/models/yolov5n.json
+  # - ../oakd/models/yolov5s.json
+  
+  confidence_threshold: 0.5
+  input_size: [640, 352]  # YOLOv6n uses 640x352 (16:9 aspect ratio)
+  
+  # COCO class labels (80 classes)
+  use_spatial_detection: false  # Set to true to get depth for each detection
+  
+  # Spatial detection settings (if enabled)
+  spatial:
+    roi_size: [0.3, 0.3]  # ROI size for spatial depth calculation
+
+# Camera device settings
+device:
+  # DepthAI logging level
+  log_level: "warn"  # Options: error, warn, info, debug
+  
+  # Optional: specify device ID if multiple devices
+  # device_id: null
+

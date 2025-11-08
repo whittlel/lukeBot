@@ -1,0 +1,83 @@
+# Robot Physical Configuration
+# Mecanum wheel chassis in X-pattern
+
+robot:
+  # Physical dimensions (in meters)
+  dimensions:
+    length: 0.30   # Robot length (front to back)
+    width: 0.25    # Robot width (side to side)
+    height: 0.15   # Robot height
+    wheel_base: 0.20  # Distance between front and rear wheels
+    track_width: 0.20  # Distance between left and right wheels
+  
+  # Wheel specifications
+  wheels:
+    radius: 0.05    # Wheel radius in meters
+    type: "mecanum" # Mecanum wheels
+    pattern: "X"    # X-pattern layout
+    
+    # Wheel positions (viewed from top, robot facing forward)
+    # Front-left (FL), Front-right (FR), Rear-left (RL), Rear-right (RR)
+    positions:
+      FL: [0.10, 0.10]   # Front-left
+      FR: [0.10, -0.10]   # Front-right
+      RL: [-0.10, 0.10]   # Rear-left
+      RR: [-0.10, -0.10]  # Rear-right
+
+# Motor Control Configuration
+motors:
+  # Arduino communication
+  arduino:
+    port: null  # Auto-detect, or specify: "/dev/ttyACM0" (Linux) or "COM3" (Windows)
+    baud_rate: 115200
+    timeout: 1.0  # seconds
+    
+  # L298N Motor Driver Configuration
+  # Left side (L298N #1): Front-left and Rear-left motors
+  # Right side (L298N #2): Front-right and Rear-right motors
+  
+  l298n_left:
+    # Arduino Mega pins for L298N #1
+    in1: 2
+    in2: 3
+    in3: 4
+    in4: 5
+    ena: 6   # PWM pin for speed control
+    enb: 7   # PWM pin for speed control
+    motors: ["FL", "RL"]  # Front-left and Rear-left
+  
+  l298n_right:
+    # Arduino Mega pins for L298N #2
+    in1: 8
+    in2: 9
+    in3: 10
+    in4: 11
+    ena: 12  # PWM pin for speed control
+    enb: 13  # PWM pin for speed control
+    motors: ["FR", "RR"]  # Front-right and Rear-right
+  
+  # Motor control parameters
+  control:
+    max_speed: 100      # Maximum PWM value (0-255)
+    min_speed: 30       # Minimum PWM value to overcome friction
+    acceleration: 0.5   # Acceleration rate (0-1)
+    deceleration: 0.5   # Deceleration rate (0-1)
+    
+  # Mecanum wheel kinematics (placeholder/TODO)
+  kinematics:
+    # TODO: Implement inverse kinematics
+    # Converts (vx, vy, omega) to individual wheel speeds
+    # TODO: Implement forward kinematics
+    # Converts wheel speeds to robot velocity
+
+# Motion control
+motion:
+  # High-level command defaults
+  default_speed: 50      # Default speed (0-100)
+  default_turn_speed: 50 # Default turn speed (0-100)
+  max_turn_angle: 360    # Maximum turn angle (degrees)
+  
+  # Safety limits
+  max_linear_speed: 0.5  # m/s
+  max_angular_speed: 1.0 # rad/s
+
