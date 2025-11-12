@@ -6,7 +6,7 @@ slam:
   visual_odometry:
     # Feature detector
     detector_type: "ORB"  # Options: ORB, SIFT, SURF
-    max_features: 1000    # Maximum number of features to detect
+    max_features: 500     # Maximum number of features to detect (reduced for Jetson performance)
     quality_level: 0.01   # Quality level for feature detection
     
     # Feature matcher
@@ -18,6 +18,10 @@ slam:
     ransac_threshold: 1.0  # Pixel threshold for RANSAC
     ransac_confidence: 0.99
     ransac_max_iterations: 2000
+    
+    # IMU integration for visual-inertial odometry
+    use_imu: true         # Enable IMU fusion
+    imu_alpha: 0.9        # IMU fusion weight (0-1, higher = more trust in IMU)
   
   # Stereo Processing
   stereo:
@@ -80,6 +84,30 @@ slam:
     # Threading
     use_threading: true
     num_threads: 2  # Number of threads for processing
+  
+  # Exploration Settings
+  exploration:
+    min_frontier_size: 5        # Minimum number of cells in a frontier cluster
+    max_frontier_distance: 10.0 # Maximum distance to consider frontier (meters)
+    exploration_radius: 2.0     # Exploration radius around robot (meters)
+    distance_weight: 0.3        # Weight for distance in frontier selection
+    information_weight: 0.7     # Weight for information gain in frontier selection
+  
+  # Path Planning Settings
+  path_planning:
+    obstacle_inflation: 0.2     # Obstacle inflation radius (meters)
+    safety_margin: 0.15          # Safety margin around obstacles (meters)
+    heuristic_weight: 1.0       # A* heuristic weight
+    max_path_length: 50.0        # Maximum path length (meters)
+  
+  # Obstacle Avoidance Settings
+  obstacle_avoidance:
+    min_safe_distance: 0.5      # Minimum safe distance from obstacles (meters)
+    emergency_stop_distance: 0.3 # Emergency stop distance (meters)
+    obstacle_inflation_radius: 0.2 # Obstacle inflation radius (meters)
+    use_yolo: true              # Enable YOLO for dynamic obstacle detection
+    human_class_id: 0           # COCO class ID for person (0)
+    yolo_confidence_threshold: 0.5 # YOLO detection confidence threshold
 
 # Map Storage
 storage:

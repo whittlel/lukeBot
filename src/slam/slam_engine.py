@@ -44,13 +44,19 @@ class SLAMEngine:
         # Keyframes
         self.keyframes = []
     
-    def process_frame(self, rgb_image: np.ndarray, depth_image: Optional[np.ndarray] = None) -> Optional[RobotPose]:
+    def set_camera_intrinsics(self, camera_matrix, dist_coeffs=None):
+        """Set camera intrinsics for visual odometry."""
+        self.visual_odometry.set_camera_intrinsics(camera_matrix, dist_coeffs)
+    
+    def process_frame(self, rgb_image: np.ndarray, depth_image: Optional[np.ndarray] = None,
+                     imu_data: Optional[dict] = None) -> Optional[RobotPose]:
         """
         Process a new frame for SLAM.
         
         Args:
             rgb_image: RGB image from camera
             depth_image: Depth map from camera (optional)
+            imu_data: IMU data dictionary (optional)
         
         Returns:
             Current pose estimate or None if processing failed
@@ -63,8 +69,8 @@ class SLAMEngine:
             return self.current_pose
         
         try:
-            # Estimate pose change using visual odometry
-            delta_pose = self.visual_odometry.estimate_pose(rgb_image, depth_image)
+            # Estimate pose change using visual odometry with IMU
+            delta_pose = self.visual_odometry.estimate_pose(rgb_image, depth_image, imu_data)
             
             if delta_pose is not None:
                 # Update cumulative pose

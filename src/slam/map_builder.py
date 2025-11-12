@@ -56,6 +56,10 @@ class MapBuilder:
         # Point cloud
         self.point_cloud = []
         
+        # Camera intrinsics (for depth projection)
+        self.camera_matrix = None
+        self.dist_coeffs = None
+        
         # Last save time
         self.last_save_time = datetime.now()
     
@@ -87,16 +91,27 @@ class MapBuilder:
         y = (j - self.grid_origin[1]) * self.grid_resolution
         return x, y
     
-    def update_occupancy_grid(self, pose: RobotPose, depth_map: Optional[np.ndarray] = None):
+    def set_camera_intrinsics(self, camera_matrix: np.ndarray, dist_coeffs: Optional[np.ndarray] = None):
+        """Set camera intrinsics for depth projection."""
+        self.camera_matrix = camera_matrix
+        self.dist_coeffs = dist_coeffs
+    
+    def update_occupancy_grid(self, pose: RobotPose, depth_map: Optional[np.ndarray] = None,
+                             camera_matrix: Optional[np.ndarray] = None):
         """
         Update occupancy grid with new pose and sensor data.
         
         Args:
             pose: Current robot pose
             depth_map: Depth map from camera
+            camera_matrix: Camera intrinsics matrix (optional, uses stored if None)
         """
         if self.occupancy_grid is None:
             return
+        
+        # Use provided camera matrix or stored one
+        if camera_matrix is not None:
+            self.camera_matrix = camera_matrix
         
         # Add pose to trajectory
         self.trajectory.append(pose)
@@ -107,11 +122,95 @@ class MapBuilder:
             # Robot position is free
             self.occupancy_grid[i, j] = self.prob_free
         
-        # TODO: Process depth map to update obstacles
-        # For now, just mark robot path as free
-        if depth_map is not None:
-            # TODO: Project depth points to grid and mark obstacles
-            pass
+        # Process depth map to update obstacles
+        if depth_map is not None and self.camera_matrix is not None:
+            self._update_grid_from_depth(pose, depth_map)
+    
+    def _update_grid_from_depth(self, pose: RobotPose, depth_map: np.ndarray):
+        """Update occupancy grid from depth map using raycasting."""
+        if self.camera_matrix is None:
+            return
+        
+        fx = self.camera_matrix[0, 0]
+        fy = self.camera_matrix[1, 1]
+        cx = self.camera_matrix[0, 2]
+        cy = self.camera_matrix[1, 2]
+        
+        # Sample depth points (every Nth pixel for performance)
+        step = max(1, min(depth_map.shape[0] // 50, depth_map.shape[1] // 50))
+        
+        for y in range(0, depth_map.shape[0], step):
+            for x in range(0, depth_map.shape[1], step):
+                depth = depth_map[y, x]
+                
+                # Skip invalid depth
+                if depth <= 0.1 or depth > 10.0:
+                    continue
+                
+                # Convert pixel to 3D point in camera frame
+                # Camera frame: X right, Y down, Z forward
+                x_cam = (x - cx) * depth / fx
+                y_cam = (y - cy) * depth / fy
+                z_cam = depth
+                
+                # Transform to world frame (robot frame)
+                # Robot frame: X forward, Y left, Z up
+                # Camera is mounted on robot, assume camera forward = robot forward
+                # For 2D mapping, we project to XY plane
+                cos_theta = np.cos(pose.theta)
+                sin_theta = np.sin(pose.theta)
+                
+                # Transform to world coordinates
+                x_world = pose.x + z_cam * cos_theta - x_cam * sin_theta
+                y_world = pose.y + z_cam * sin_theta + x_cam * cos_theta
+                
+                # Convert to grid coordinates
+                i, j = self.world_to_grid(x_world, y_world)
+                
+                # Raycast from robot to obstacle
+                robot_i, robot_j = self.world_to_grid(pose.x, pose.y)
+                
+                # Mark cells along ray as free
+                self._raycast_free_space(robot_i, robot_j, i, j)
+                
+                # Mark obstacle cell as occupied
+                if 0 <= i < self.grid_size[0] and 0 <= j < self.grid_size[1]:
+                    # Update with probabilistic occupancy
+                    current_prob = self.occupancy_grid[i, j]
+                    if current_prob < 0.5:  # Unknown or free
+                        self.occupancy_grid[i, j] = min(1.0, current_prob + self.prob_occupied * 0.1)
+                    else:  # Already occupied
+                        self.occupancy_grid[i, j] = min(1.0, current_prob + self.prob_occupied * 0.05)
+    
+    def _raycast_free_space(self, x0: int, y0: int, x1: int, y1: int):
+        """Mark cells along ray as free space using Bresenham's line algorithm."""
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+        
+        x, y = x0, y0
+        
+        while True:
+            # Mark cell as free (but don't mark the obstacle itself)
+            if (x, y) != (x1, y1) and 0 <= x < self.grid_size[0] and 0 <= y < self.grid_size[1]:
+                current_prob = self.occupancy_grid[x, y]
+                if current_prob > 0.5:  # Unknown or occupied
+                    self.occupancy_grid[x, y] = max(0.0, current_prob - self.prob_free * 0.1)
+                else:  # Already free
+                    self.occupancy_grid[x, y] = max(0.0, current_prob - self.prob_free * 0.05)
+            
+            if x == x1 and y == y1:
+                break
+            
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
     
     def add_point_cloud_point(self, point: MapPoint):
         """Add point to point cloud."""

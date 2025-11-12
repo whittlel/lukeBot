@@ -84,12 +84,21 @@ class OakDCamera:
         self.frame_queue = queue.Queue(maxsize=2)
         self.detection_queue = queue.Queue(maxsize=2)
         self.depth_queue = queue.Queue(maxsize=2)
+        self.imu_queue = queue.Queue(maxsize=2)
         
         # FPS tracking
         self.fps = 0.0
         self.frame_count = 0
         self.last_fps_time = time.time()
         self.process_thread = None
+        
+        # Camera intrinsics (will be loaded from device)
+        self.camera_intrinsics = None
+        self.distortion_coeffs = None
+        
+        # IMU enable flag
+        self.enable_imu = self.depth_config.get('enable_imu', True)
+        self.enable_extended_disparity = self.depth_config.get('extended_disparity', True)
     
     def _resolve_model_path(self, model_path):
         """Resolve model path - handle .json files and find .blob files."""
@@ -178,6 +187,10 @@ class OakDCamera:
         stereo.setSubpixel(False)
         stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
         
+        # Enable Extended Disparity Mode for better close-range depth
+        if self.enable_extended_disparity:
+            stereo.setExtendedDisparity(True)
+        
         # Link mono cameras to stereo
         mono_left.out.link(stereo.left)
         mono_right.out.link(stereo.right)
@@ -213,6 +226,19 @@ class OakDCamera:
         xout_depth.setStreamName("depth")
         stereo.depth.link(xout_depth.input)
         
+        # Add IMU node if enabled
+        if self.enable_imu:
+            imu = pipeline.create(dai.node.IMU)
+            imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW, 
+                                dai.IMUSensor.GYROSCOPE_RAW,
+                                dai.IMUSensor.MAGNETOMETER_RAW], 400)
+            imu.setBatchReportThreshold(1)
+            imu.setMaxBatchReports(10)
+            
+            xout_imu = pipeline.create(dai.node.XLinkOut)
+            xout_imu.setStreamName("imu")
+            imu.out.link(xout_imu.input)
+        
         return pipeline
     
     def start(self):
@@ -228,6 +254,22 @@ class OakDCamera:
             self.q_video = self.device.getOutputQueue(name="video", maxSize=4, blocking=False)
             self.q_nn = self.device.getOutputQueue(name="nn", maxSize=4, blocking=False)
             self.q_depth = self.device.getOutputQueue(name="depth", maxSize=4, blocking=False)
+            
+            if self.enable_imu:
+                self.q_imu = self.device.getOutputQueue(name="imu", maxSize=4, blocking=False)
+            else:
+                self.q_imu = None
+            
+            # Get camera intrinsics from device
+            try:
+                calib_data = self.device.readCalibration()
+                self.camera_intrinsics = calib_data.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A)
+                self.distortion_coeffs = calib_data.getDistortionCoefficients(dai.CameraBoardSocket.CAM_A)
+                print(f"[INFO] Loaded camera intrinsics from device")
+            except Exception as e:
+                print(f"[WARNING] Could not load camera intrinsics: {e}")
+                self.camera_intrinsics = None
+                self.distortion_coeffs = None
             
             self.running = True
             
@@ -252,6 +294,7 @@ class OakDCamera:
         self.q_video = None
         self.q_nn = None
         self.q_depth = None
+        self.q_imu = None
         
         # Clear queues
         while not self.frame_queue.empty():
@@ -267,6 +310,11 @@ class OakDCamera:
         while not self.depth_queue.empty():
             try:
                 self.depth_queue.get_nowait()
+            except:
+                pass
+        while not self.imu_queue.empty():
+            try:
+                self.imu_queue.get_nowait()
             except:
                 pass
     
@@ -290,6 +338,43 @@ class OakDCamera:
                     in_depth = self.q_depth.tryGet()
                     if in_depth is not None:
                         depth_frame = in_depth.getFrame()
+                    
+                    # Get IMU data
+                    imu_data = None
+                    if self.q_imu is not None:
+                        in_imu = self.q_imu.tryGet()
+                        if in_imu is not None:
+                            # IMU data comes as IMUData object with packets attribute
+                            try:
+                                imu_packets = in_imu.packets
+                                if imu_packets and len(imu_packets) > 0:
+                                    imu_data = {
+                                        'accel': None,
+                                        'gyro': None,
+                                        'mag': None,
+                                        'timestamp': None
+                                    }
+                                    # Iterate through all packets to find different sensor types
+                                    # Each packet may contain different sensor data
+                                    for imu_packet in imu_packets:
+                                        # Check if packet has accelerometer data
+                                        if hasattr(imu_packet, 'acceleroMeter'):
+                                            imu_data['accel'] = imu_packet.acceleroMeter
+                                            if hasattr(imu_packet, 'timestamp'):
+                                                imu_data['timestamp'] = imu_packet.timestamp.get()
+                                        # Check if packet has gyroscope data
+                                        if hasattr(imu_packet, 'gyroscope'):
+                                            imu_data['gyro'] = imu_packet.gyroscope
+                                        # Check if packet has magnetometer data
+                                        if hasattr(imu_packet, 'magneticField'):
+                                            imu_data['mag'] = imu_packet.magneticField
+                                    
+                                    # If no data found, set to None
+                                    if imu_data['accel'] is None and imu_data['gyro'] is None and imu_data['mag'] is None:
+                                        imu_data = None
+                            except (AttributeError, TypeError) as e:
+                                # Skip IMU data if we can't parse it
+                                imu_data = None
                     
                     # Update FPS
                     self.frame_count += 1
@@ -324,6 +409,15 @@ class OakDCamera:
                         try:
                             self.depth_queue.get_nowait()
                             self.depth_queue.put_nowait(depth_frame)
+                        except:
+                            pass
+                    
+                    try:
+                        self.imu_queue.put_nowait(imu_data)
+                    except queue.Full:
+                        try:
+                            self.imu_queue.get_nowait()
+                            self.imu_queue.put_nowait(imu_data)
                         except:
                             pass
                 
@@ -370,8 +464,23 @@ class OakDCamera:
         except queue.Empty:
             return None
     
+    def get_imu_data(self):
+        """Get latest IMU data."""
+        try:
+            return self.imu_queue.get_nowait()
+        except queue.Empty:
+            return None
+    
+    def get_camera_intrinsics(self):
+        """Get camera intrinsics matrix."""
+        return self.camera_intrinsics
+    
+    def get_distortion_coeffs(self):
+        """Get distortion coefficients."""
+        return self.distortion_coeffs
+    
     def get_all_data(self, raw_depth=False):
-        """Get synchronized RGB, depth, and detections.
+        """Get synchronized RGB, depth, detections, and IMU data.
         
         Args:
             raw_depth: If True, return raw depth in mm. If False, return processed depth in meters.
@@ -379,11 +488,13 @@ class OakDCamera:
         rgb_frame = self.get_rgb_frame()
         depth_frame = self.get_depth_frame(raw=raw_depth)
         detections = self.get_detections()
+        imu_data = self.get_imu_data()
         
         return {
             'rgb': rgb_frame,
             'depth': depth_frame,
             'detections': detections,
+            'imu': imu_data,
             'fps': self.fps
         }
     

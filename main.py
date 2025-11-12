@@ -17,8 +17,11 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from camera.oakd_camera import OakDCamera
 from slam.slam_engine import SLAMEngine
+from slam.exploration_planner import ExplorationPlanner
+from slam.obstacle_avoidance import ObstacleAvoidance
 from motor_control.arduino_interface import ArduinoInterface
 from motor_control.motion_planner import MotionPlanner
+from motor_control.path_planner import PathPlanner
 from utils.logger import setup_logger
 from utils.data_structures import RobotPose
 
@@ -64,6 +67,9 @@ class LukeBot:
         self.logger.info("Initializing SLAM...")
         self.slam = SLAMEngine(config=slam_config)
         
+        # Set camera intrinsics in SLAM after camera starts
+        # (Will be set in start() method after camera initialization)
+        
         # Arduino interface
         self.logger.info("Initializing Arduino interface...")
         arduino_config = robot_config.get('motors', {}).get('arduino', {})
@@ -80,9 +86,25 @@ class LukeBot:
             config=robot_config
         )
         
+        # Path planner
+        self.logger.info("Initializing path planner...")
+        self.path_planner = PathPlanner(config=robot_config)
+        
+        # Exploration planner
+        self.logger.info("Initializing exploration planner...")
+        self.exploration_planner = ExplorationPlanner(config=slam_config)
+        
+        # Obstacle avoidance
+        self.logger.info("Initializing obstacle avoidance...")
+        self.obstacle_avoidance = ObstacleAvoidance(config=slam_config)
+        
         # Control flags
         self.running = False
         self.paused = False
+        self.autonomous_mode = False
+        self.current_path = None
+        self.current_waypoint_index = 0
+        self.exploration_target = None
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -108,6 +130,14 @@ class LukeBot:
             self.logger.error("Failed to start camera")
             self.arduino.disconnect()
             return False
+        
+        # Set camera intrinsics in SLAM
+        camera_matrix = self.camera.get_camera_intrinsics()
+        dist_coeffs = self.camera.get_distortion_coeffs()
+        if camera_matrix is not None:
+            self.slam.set_camera_intrinsics(camera_matrix, dist_coeffs)
+            self.slam.map_builder.set_camera_intrinsics(camera_matrix, dist_coeffs)
+            self.logger.info("Camera intrinsics set in SLAM")
         
         self.running = True
         self.logger.info("LukeBot started successfully")
@@ -158,11 +188,26 @@ class LukeBot:
                     time.sleep(0.01)
                     continue
                 
-                # Process frame for SLAM
-                pose = self.slam.process_frame(data['rgb'], data['depth'])
+                # Update obstacle avoidance with YOLO detections
+                camera_matrix = self.camera.get_camera_intrinsics()
+                self.obstacle_avoidance.update_dynamic_obstacles(
+                    data['detections'], data['depth'], camera_matrix
+                )
+                
+                # Process frame for SLAM with IMU data
+                pose = self.slam.process_frame(data['rgb'], data['depth'], data.get('imu'))
+                
+                # Check for emergency stop
+                if pose is not None and self.obstacle_avoidance.should_emergency_stop(pose):
+                    self.motion_planner.stop()
+                    self.logger.warning("Emergency stop triggered!")
                 
                 if pose is not None:
                     self.logger.debug(f"Pose: x={pose.x:.2f}, y={pose.y:.2f}, theta={pose.theta:.2f}")
+                    
+                    # Autonomous exploration mode
+                    if self.autonomous_mode:
+                        self._autonomous_exploration(pose, data['rgb'])
                 
                 # Draw detections on frame
                 frame = self.camera.draw_detections(data['rgb'], data['detections'])
@@ -210,6 +255,13 @@ class LukeBot:
                 elif key == ord(' '):
                     # Stop
                     self.motion_planner.stop()
+                elif key == ord('e'):
+                    # Toggle autonomous exploration mode
+                    self.autonomous_mode = not self.autonomous_mode
+                    self.logger.info(f"Autonomous mode: {self.autonomous_mode}")
+                    if not self.autonomous_mode:
+                        self.motion_planner.stop()
+                        self.current_path = None
                 
                 time.sleep(0.01)
         
@@ -220,6 +272,108 @@ class LukeBot:
         finally:
             cv2.destroyAllWindows()
             self.stop()
+    
+    def _autonomous_exploration(self, pose: RobotPose, rgb_image: np.ndarray):
+        """Autonomous exploration logic."""
+        # Get occupancy grid
+        occupancy_grid = self.slam.map_builder.occupancy_grid
+        if occupancy_grid is None:
+            return
+        
+        # Check if we need a new exploration target
+        if self.exploration_target is None or self.current_path is None or \
+           self.current_waypoint_index >= len(self.current_path):
+            
+            # Get next exploration waypoint
+            grid_resolution = self.slam.map_builder.grid_resolution
+            grid_origin = self.slam.map_builder.grid_origin
+            prob_free = self.slam.map_builder.prob_free
+            prob_occupied = self.slam.map_builder.prob_occupied
+            prob_unknown = self.slam.map_builder.prob_unknown
+            
+            waypoint = self.exploration_planner.get_exploration_waypoint(
+                occupancy_grid, pose, grid_resolution, grid_origin,
+                prob_free, prob_occupied, prob_unknown
+            )
+            
+            if waypoint is None:
+                self.logger.info("No more frontiers to explore")
+                self.autonomous_mode = False
+                return
+            
+            self.exploration_target = waypoint
+            
+            # Plan path to waypoint
+            self.current_path = self.path_planner.plan_path(
+                pose, waypoint, occupancy_grid, grid_resolution, grid_origin,
+                prob_free, prob_occupied
+            )
+            
+            if self.current_path is None:
+                self.logger.warning("Could not plan path to exploration target")
+                self.exploration_target = None
+                return
+            
+            self.current_waypoint_index = 0
+            self.logger.info(f"New exploration target: {waypoint}, path length: {len(self.current_path)}")
+        
+        # Follow current path
+        if self.current_path and self.current_waypoint_index < len(self.current_path):
+            target = self.current_path[self.current_waypoint_index]
+            
+            # Calculate distance to waypoint
+            distance = np.sqrt((target[0] - pose.x)**2 + (target[1] - pose.y)**2)
+            
+            if distance < 0.2:  # Reached waypoint
+                self.current_waypoint_index += 1
+                if self.current_waypoint_index < len(self.current_path):
+                    target = self.current_path[self.current_waypoint_index]
+                else:
+                    # Reached exploration target
+                    self.exploration_target = None
+                    return
+            
+            # Calculate direction to waypoint
+            dx = target[0] - pose.x
+            dy = target[1] - pose.y
+            
+            # Check for obstacles in path
+            if self.obstacle_avoidance.check_collision(pose, occupancy_grid,
+                                                      self.slam.map_builder.grid_resolution,
+                                                      self.slam.map_builder.grid_origin):
+                # Try to find safe direction
+                safe_dir = self.obstacle_avoidance.get_safe_direction(
+                    pose, occupancy_grid, self.slam.map_builder.grid_resolution,
+                    self.slam.map_builder.grid_origin
+                )
+                
+                if safe_dir is None:
+                    # No safe direction, replan
+                    self.current_path = None
+                    self.exploration_target = None
+                    return
+                else:
+                    dx, dy = safe_dir
+            
+            # Calculate angle to waypoint
+            target_angle = np.arctan2(dy, dx)
+            angle_diff = target_angle - pose.theta
+            
+            # Normalize angle to [-pi, pi]
+            while angle_diff > np.pi:
+                angle_diff -= 2 * np.pi
+            while angle_diff < -np.pi:
+                angle_diff += 2 * np.pi
+            
+            # Move towards waypoint
+            if abs(angle_diff) > 0.2:  # Need to turn
+                if angle_diff > 0:
+                    self.motion_planner.turn_left(np.degrees(abs(angle_diff)))
+                else:
+                    self.motion_planner.turn_right(np.degrees(abs(angle_diff)))
+            else:  # Move forward
+                speed = min(50, int(distance * 20))  # Adjust speed based on distance
+                self.motion_planner.move_forward(speed)
 
 
 def main():
@@ -235,6 +389,7 @@ def main():
     print("  a - Turn left")
     print("  d - Turn right")
     print("  Space - Stop")
+    print("  e - Toggle autonomous exploration mode")
     print("=" * 50)
     
     robot = LukeBot()

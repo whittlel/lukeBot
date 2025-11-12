@@ -24,6 +24,8 @@ camera:
     subpixel: false
     depth_align: "CAM_A"  # Align depth to RGB camera
     confidence_threshold: 200
+    extended_disparity: true  # Enable Extended Disparity Mode for better close-range depth
+    enable_imu: true  # Enable IMU (BNO085) for visual-inertial odometry
 
 # YOLO Detection Configuration
 yolo:

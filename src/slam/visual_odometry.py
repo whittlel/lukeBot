@@ -71,10 +71,17 @@ class VisualOdometry:
         self.prev_keypoints = None
         self.prev_descriptors = None
         self.prev_pose = RobotPose(0.0, 0.0, 0.0)  # Start at origin
+        self.prev_depth = None
         
-        # Camera intrinsics (placeholder - should be calibrated)
+        # Camera intrinsics (will be set from camera)
         self.camera_matrix = None
         self.dist_coeffs = None
+        
+        # IMU data for visual-inertial odometry
+        self.use_imu = vo_config.get('use_imu', True)
+        self.prev_imu_data = None
+        self.imu_gravity = np.array([0.0, 0.0, -9.81])  # Gravity vector
+        self.imu_alpha = vo_config.get('imu_alpha', 0.9)  # IMU fusion weight
         
     def detect_features(self, image: np.ndarray) -> Tuple[List[cv2.KeyPoint], np.ndarray]:
         """
@@ -119,13 +126,20 @@ class VisualOdometry:
         
         return good_matches
     
-    def estimate_pose(self, curr_image: np.ndarray, curr_depth: Optional[np.ndarray] = None) -> Optional[RobotPose]:
+    def set_camera_intrinsics(self, camera_matrix: np.ndarray, dist_coeffs: Optional[np.ndarray] = None):
+        """Set camera intrinsics from calibration."""
+        self.camera_matrix = camera_matrix
+        self.dist_coeffs = dist_coeffs
+    
+    def estimate_pose(self, curr_image: np.ndarray, curr_depth: Optional[np.ndarray] = None, 
+                     imu_data: Optional[dict] = None) -> Optional[RobotPose]:
         """
-        Estimate pose change from previous frame.
+        Estimate pose change from previous frame using visual odometry with optional depth and IMU.
         
         Args:
             curr_image: Current RGB image
             curr_depth: Current depth map (optional)
+            imu_data: IMU data dictionary with 'accel', 'gyro', 'mag', 'timestamp' (optional)
         
         Returns:
             Estimated pose change (delta pose) or None if estimation fails
@@ -143,6 +157,8 @@ class VisualOdometry:
             self.prev_frame = curr_gray
             self.prev_keypoints = curr_keypoints
             self.prev_descriptors = curr_descriptors
+            self.prev_depth = curr_depth
+            self.prev_imu_data = imu_data
             return RobotPose(0.0, 0.0, 0.0)  # No motion
         
         # Match features
@@ -153,23 +169,31 @@ class VisualOdometry:
             self.prev_frame = curr_gray
             self.prev_keypoints = curr_keypoints
             self.prev_descriptors = curr_descriptors
+            self.prev_depth = curr_depth
+            self.prev_imu_data = imu_data
             return None
         
         # Extract matched points
         prev_pts = np.float32([self.prev_keypoints[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
         curr_pts = np.float32([curr_keypoints[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
         
-        # Estimate motion using essential matrix or homography
-        # For now, use simple translation estimation
-        # TODO: Implement proper essential matrix estimation with camera intrinsics
+        # Try 3D pose estimation with depth if available
+        if self.camera_matrix is not None and curr_depth is not None and self.prev_depth is not None:
+            delta_pose = self._estimate_pose_3d(prev_pts, curr_pts, curr_depth, self.prev_depth)
+            if delta_pose is not None:
+                # Fuse with IMU if available
+                if self.use_imu and imu_data is not None and self.prev_imu_data is not None:
+                    delta_pose = self._fuse_imu(delta_pose, imu_data, self.prev_imu_data)
+                
+                # Update previous frame
+                self.prev_frame = curr_gray
+                self.prev_keypoints = curr_keypoints
+                self.prev_descriptors = curr_descriptors
+                self.prev_depth = curr_depth
+                self.prev_imu_data = imu_data
+                return delta_pose
         
-        # Simple translation estimation (placeholder)
-        if self.camera_matrix is not None and curr_depth is not None:
-            # Use depth for 3D reconstruction
-            # TODO: Implement proper 3D pose estimation
-            pass
-        
-        # Estimate homography (planar motion assumption)
+        # Fallback to 2D homography estimation
         homography, mask = cv2.findHomography(
             prev_pts, curr_pts,
             cv2.RANSAC,
@@ -182,21 +206,127 @@ class VisualOdometry:
             self.prev_frame = curr_gray
             self.prev_keypoints = curr_keypoints
             self.prev_descriptors = curr_descriptors
+            self.prev_depth = curr_depth
+            self.prev_imu_data = imu_data
             return None
         
         # Extract translation and rotation from homography
         # This is a simplified approach - proper VO would use essential matrix
-        # For now, use simple translation estimation
         dx = homography[0, 2] / 100.0  # Scale factor (placeholder)
         dy = homography[1, 2] / 100.0
         dtheta = np.arctan2(homography[1, 0], homography[0, 0])
+        
+        delta_pose = RobotPose(dx, dy, dtheta)
+        
+        # Fuse with IMU if available
+        if self.use_imu and imu_data is not None and self.prev_imu_data is not None:
+            delta_pose = self._fuse_imu(delta_pose, imu_data, self.prev_imu_data)
         
         # Update previous frame
         self.prev_frame = curr_gray
         self.prev_keypoints = curr_keypoints
         self.prev_descriptors = curr_descriptors
+        self.prev_depth = curr_depth
+        self.prev_imu_data = imu_data
+        
+        return delta_pose
+    
+    def _estimate_pose_3d(self, prev_pts: np.ndarray, curr_pts: np.ndarray,
+                         curr_depth: np.ndarray, prev_depth: np.ndarray) -> Optional[RobotPose]:
+        """Estimate pose using 3D point correspondences from depth."""
+        if self.camera_matrix is None:
+            return None
+        
+        fx = self.camera_matrix[0, 0]
+        fy = self.camera_matrix[1, 1]
+        cx = self.camera_matrix[0, 2]
+        cy = self.camera_matrix[1, 2]
+        
+        # Convert 2D points to 3D using depth
+        prev_3d = []
+        curr_3d = []
+        
+        for i, (prev_pt, curr_pt) in enumerate(zip(prev_pts, curr_pts)):
+            px, py = int(prev_pt[0, 0]), int(prev_pt[0, 1])
+            cx_pt, cy_pt = int(curr_pt[0, 0]), int(curr_pt[0, 1])
+            
+            # Check bounds
+            if (0 <= py < prev_depth.shape[0] and 0 <= px < prev_depth.shape[1] and
+                0 <= cy_pt < curr_depth.shape[0] and 0 <= cx_pt < curr_depth.shape[1]):
+                
+                d_prev = prev_depth[py, px]
+                d_curr = curr_depth[cy_pt, cx_pt]
+                
+                # Valid depth values
+                if d_prev > 0.1 and d_prev < 10.0 and d_curr > 0.1 and d_curr < 10.0:
+                    # Convert to 3D
+                    x_prev = (px - cx) * d_prev / fx
+                    y_prev = (py - cy) * d_prev / fy
+                    z_prev = d_prev
+                    
+                    x_curr = (cx_pt - cx) * d_curr / fx
+                    y_curr = (cy_pt - cy) * d_curr / fy
+                    z_curr = d_curr
+                    
+                    prev_3d.append([x_prev, y_prev, z_prev])
+                    curr_3d.append([x_curr, y_curr, z_curr])
+        
+        if len(prev_3d) < 4:
+            return None
+        
+        prev_3d = np.array(prev_3d)
+        curr_3d = np.array(curr_3d)
+        
+        # Use ICP or PnP to estimate transformation
+        # For now, use simple centroid-based estimation
+        prev_centroid = np.mean(prev_3d, axis=0)
+        curr_centroid = np.mean(curr_3d, axis=0)
+        
+        # Translation
+        translation = curr_centroid - prev_centroid
+        
+        # Simple rotation estimation (for planar motion, mainly around Z-axis)
+        # Project to XY plane for 2D motion
+        dx = translation[0]
+        dy = translation[1]
+        
+        # Estimate rotation from point correspondences
+        # Use SVD for rotation estimation
+        H = (prev_3d - prev_centroid).T @ (curr_3d - curr_centroid)
+        U, S, Vt = np.linalg.svd(H)
+        R = Vt.T @ U.T
+        
+        # Extract rotation angle (for 2D motion)
+        dtheta = np.arctan2(R[1, 0], R[0, 0])
         
         return RobotPose(dx, dy, dtheta)
+    
+    def _fuse_imu(self, visual_pose: RobotPose, curr_imu: dict, prev_imu: dict) -> RobotPose:
+        """Fuse IMU data with visual odometry estimate."""
+        if curr_imu is None or prev_imu is None:
+            return visual_pose
+        
+        if curr_imu.get('gyro') is None or prev_imu.get('gyro') is None:
+            return visual_pose
+        
+        # Get gyroscope data for rotation
+        curr_gyro = curr_imu['gyro']
+        prev_gyro = prev_imu['gyro']
+        
+        # Estimate angular velocity (simplified)
+        # For 2D motion, use Z-axis rotation
+        if hasattr(curr_gyro, 'z') and hasattr(prev_gyro, 'z'):
+            # Time difference (assume 30 FPS = 0.033s)
+            dt = 0.033
+            gyro_z = (curr_gyro.z + prev_gyro.z) / 2.0
+            imu_dtheta = gyro_z * dt
+            
+            # Fuse rotation estimates
+            fused_theta = self.imu_alpha * imu_dtheta + (1 - self.imu_alpha) * visual_pose.theta
+            
+            return RobotPose(visual_pose.x, visual_pose.y, fused_theta)
+        
+        return visual_pose
     
     def update_pose(self, delta_pose: RobotPose) -> RobotPose:
         """
