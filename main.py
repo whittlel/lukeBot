@@ -12,18 +12,18 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add parent to path for proper package imports
+sys.path.insert(0, str(Path(__file__).parent))
 
-from camera.oakd_camera import OakDCamera
-from slam.slam_engine import SLAMEngine
-from slam.exploration_planner import ExplorationPlanner
-from slam.obstacle_avoidance import ObstacleAvoidance
-from motor_control.arduino_interface import ArduinoInterface
-from motor_control.motion_planner import MotionPlanner
-from motor_control.path_planner import PathPlanner
-from utils.logger import setup_logger
-from utils.data_structures import RobotPose
+from src.camera.oakd_camera import OakDCamera
+from src.slam.slam_engine import SLAMEngine
+from src.slam.exploration_planner import ExplorationPlanner
+from src.slam.obstacle_avoidance import ObstacleAvoidance
+from src.motor_control.arduino_interface import ArduinoInterface
+from src.motor_control.motion_planner import MotionPlanner
+from src.motor_control.path_planner import PathPlanner
+from src.utils.logger import setup_logger
+from src.utils.data_structures import RobotPose
 
 
 class LukeBot:
@@ -101,7 +101,7 @@ class LukeBot:
         # Control flags
         self.running = False
         self.paused = False
-        self.autonomous_mode = False
+        self.autonomous_mode = True
         self.current_path = None
         self.current_waypoint_index = 0
         self.exploration_target = None

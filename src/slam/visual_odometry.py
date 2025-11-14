@@ -236,11 +236,16 @@ class VisualOdometry:
         """Estimate pose using 3D point correspondences from depth."""
         if self.camera_matrix is None:
             return None
-        
-        fx = self.camera_matrix[0, 0]
-        fy = self.camera_matrix[1, 1]
-        cx = self.camera_matrix[0, 2]
-        cy = self.camera_matrix[1, 2]
+
+        # Ensure camera_matrix is a numpy array
+        camera_matrix = self.camera_matrix
+        if not isinstance(camera_matrix, np.ndarray):
+            camera_matrix = np.array(camera_matrix)
+
+        fx = camera_matrix[0, 0]
+        fy = camera_matrix[1, 1]
+        cx = camera_matrix[0, 2]
+        cy = camera_matrix[1, 2]
         
         # Convert 2D points to 3D using depth
         prev_3d = []

@@ -51,7 +51,11 @@ class ObstacleAvoidance:
         
         if depth_map is None or camera_matrix is None:
             return
-        
+
+        # Ensure camera_matrix is a numpy array
+        if not isinstance(camera_matrix, np.ndarray):
+            camera_matrix = np.array(camera_matrix)
+
         fx = camera_matrix[0, 0]
         fy = camera_matrix[1, 1]
         cx = camera_matrix[0, 2]
