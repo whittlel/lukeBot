@@ -101,7 +101,7 @@ class LukeBot:
         # Control flags
         self.running = False
         self.paused = False
-        self.autonomous_mode = True
+        self.autonomous_mode = False  # Start with autonomous mode OFF for safety
         self.current_path = None
         self.current_waypoint_index = 0
         self.exploration_target = None
@@ -242,16 +242,16 @@ class LukeBot:
                     self.logger.info(f"Paused: {self.paused}")
                 elif key == ord('w'):
                     # Move forward
-                    self.motion_planner.move_forward(50)
+                    self.motion_planner.move_forward(25)
                 elif key == ord('s'):
                     # Move backward
-                    self.motion_planner.move_backward(50)
+                    self.motion_planner.move_backward(25)
                 elif key == ord('a'):
                     # Turn left
-                    self.motion_planner.turn_left(90.0)
+                    self.motion_planner.turn_left(45.0)
                 elif key == ord('d'):
                     # Turn right
-                    self.motion_planner.turn_right(90.0)
+                    self.motion_planner.turn_right(45.0)
                 elif key == ord(' '):
                     # Stop
                     self.motion_planner.stop()
@@ -262,8 +262,8 @@ class LukeBot:
                     if not self.autonomous_mode:
                         self.motion_planner.stop()
                         self.current_path = None
-                
-                time.sleep(0.01)
+
+                time.sleep(0.05)  # Increased from 0.01 to 0.05 to reduce loop rate
         
         except KeyboardInterrupt:
             self.logger.info("Keyboard interrupt received")
@@ -274,106 +274,74 @@ class LukeBot:
             self.stop()
     
     def _autonomous_exploration(self, pose: RobotPose, rgb_image: np.ndarray):
-        """Autonomous exploration logic."""
-        # Get occupancy grid
-        occupancy_grid = self.slam.map_builder.occupancy_grid
-        if occupancy_grid is None:
-            return
-        
-        # Check if we need a new exploration target
-        if self.exploration_target is None or self.current_path is None or \
-           self.current_waypoint_index >= len(self.current_path):
-            
-            # Get next exploration waypoint
-            grid_resolution = self.slam.map_builder.grid_resolution
-            grid_origin = self.slam.map_builder.grid_origin
-            prob_free = self.slam.map_builder.prob_free
-            prob_occupied = self.slam.map_builder.prob_occupied
-            prob_unknown = self.slam.map_builder.prob_unknown
-            
-            waypoint = self.exploration_planner.get_exploration_waypoint(
-                occupancy_grid, pose, grid_resolution, grid_origin,
-                prob_free, prob_occupied, prob_unknown
-            )
-            
-            if waypoint is None:
-                self.logger.info("No more frontiers to explore")
-                self.autonomous_mode = False
-                return
-            
-            self.exploration_target = waypoint
-            
-            # Plan path to waypoint
-            self.current_path = self.path_planner.plan_path(
-                pose, waypoint, occupancy_grid, grid_resolution, grid_origin,
-                prob_free, prob_occupied
-            )
-            
-            if self.current_path is None:
-                self.logger.warning("Could not plan path to exploration target")
-                self.exploration_target = None
-                return
-            
-            self.current_waypoint_index = 0
-            self.logger.info(f"New exploration target: {waypoint}, path length: {len(self.current_path)}")
-        
-        # Follow current path
-        if self.current_path and self.current_waypoint_index < len(self.current_path):
-            target = self.current_path[self.current_waypoint_index]
-            
-            # Calculate distance to waypoint
-            distance = np.sqrt((target[0] - pose.x)**2 + (target[1] - pose.y)**2)
-            
-            if distance < 0.2:  # Reached waypoint
-                self.current_waypoint_index += 1
-                if self.current_waypoint_index < len(self.current_path):
-                    target = self.current_path[self.current_waypoint_index]
+        """Simple autonomous exploration - move forward and turn when obstacles detected."""
+        import random
+
+        # Get depth data to check for obstacles
+        data = self.camera.get_all_data()
+        depth_frame = data.get('depth')
+
+        obstacle_detected = False
+        detection_reason = ""
+
+        # Method 1: Check YOLO detections
+        for obstacle in self.obstacle_avoidance.dynamic_obstacles:
+            obs_x, obs_y, obs_z = obstacle['position']
+            distance = np.sqrt(obs_z**2 + obs_x**2)
+
+            if distance < 0.25:  # Obstacle within 25cm (very small space)
+                obstacle_detected = True
+                detection_reason = f"YOLO detection at {distance:.2f}m"
+                break
+
+        # Method 2: Check depth data in front center region
+        if not obstacle_detected and depth_frame is not None:
+            h, w = depth_frame.shape
+            # Check center region at horizon level (avoid detecting floor)
+            # Use upper-middle portion of the frame
+            center_region = depth_frame[int(h*0.35):int(h*0.65), int(w*0.35):int(w*0.65)]
+
+            if center_region.size > 0:
+                # Depth values are already in meters!
+                # Filter out invalid depths (0 or very large values)
+                valid_depths = center_region[(center_region > 0.05) & (center_region < 10.0)]  # 5cm to 10m range
+
+                if valid_depths.size > 50:  # Need at least 50 valid pixels
+                    # Use 10th percentile instead of minimum to be less sensitive to noise
+                    min_depth = np.percentile(valid_depths, 10)  # 10th percentile depth
+                    median_depth = np.median(valid_depths)
+
+                    self.logger.info(f"Depth: p10={min_depth:.2f}m, median={median_depth:.2f}m, valid_pixels={valid_depths.size}")
+
+                    # Use 10th percentile depth for obstacle detection (very small space)
+                    if min_depth < 0.25:  # Obstacle within 25cm
+                        obstacle_detected = True
+                        detection_reason = f"Depth: {min_depth:.2f}m"
                 else:
-                    # Reached exploration target
-                    self.exploration_target = None
-                    return
-            
-            # Calculate direction to waypoint
-            dx = target[0] - pose.x
-            dy = target[1] - pose.y
-            
-            # Check for obstacles in path
-            if self.obstacle_avoidance.check_collision(pose, occupancy_grid,
-                                                      self.slam.map_builder.grid_resolution,
-                                                      self.slam.map_builder.grid_origin):
-                # Try to find safe direction
-                safe_dir = self.obstacle_avoidance.get_safe_direction(
-                    pose, occupancy_grid, self.slam.map_builder.grid_resolution,
-                    self.slam.map_builder.grid_origin
-                )
-                
-                if safe_dir is None:
-                    # No safe direction, replan
-                    self.current_path = None
-                    self.exploration_target = None
-                    return
-                else:
-                    dx, dy = safe_dir
-            
-            # Calculate angle to waypoint
-            target_angle = np.arctan2(dy, dx)
-            angle_diff = target_angle - pose.theta
-            
-            # Normalize angle to [-pi, pi]
-            while angle_diff > np.pi:
-                angle_diff -= 2 * np.pi
-            while angle_diff < -np.pi:
-                angle_diff += 2 * np.pi
-            
-            # Move towards waypoint
-            if abs(angle_diff) > 0.2:  # Need to turn
-                if angle_diff > 0:
-                    self.motion_planner.turn_left(np.degrees(abs(angle_diff)))
-                else:
-                    self.motion_planner.turn_right(np.degrees(abs(angle_diff)))
-            else:  # Move forward
-                speed = min(50, int(distance * 20))  # Adjust speed based on distance
-                self.motion_planner.move_forward(speed)
+                    self.logger.debug(f"Not enough valid depth pixels: {valid_depths.size}/{center_region.size}")
+
+        if obstacle_detected:
+            self.logger.info(f"Obstacle detected ({detection_reason}), turning...")
+
+            # Randomly turn left or right to explore better
+            turn_direction = random.choice(['left', 'right'])
+            turn_angle = random.randint(60, 120)  # Random turn between 60-120 degrees
+
+            if turn_direction == 'left':
+                self.motion_planner.turn_left(turn_angle)
+            else:
+                self.motion_planner.turn_right(turn_angle)
+
+            time.sleep(1.2)
+            self.motion_planner.stop()
+            time.sleep(0.3)
+        else:
+            # Move forward slowly
+            self.logger.debug("Path clear, moving forward")
+            self.motion_planner.move_forward(15)
+            time.sleep(1.5)
+            self.motion_planner.stop()
+            time.sleep(0.3)
 
 
 def main():

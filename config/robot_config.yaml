@@ -73,8 +73,8 @@ motors:
 # Motion control
 motion:
   # High-level command defaults
-  default_speed: 50      # Default speed (0-100)
-  default_turn_speed: 50 # Default turn speed (0-100)
+  default_speed: 15      # Default speed (0-100) - reduced for stability
+  default_turn_speed: 15 # Default turn speed (0-100) - reduced for stability
   max_turn_angle: 360    # Maximum turn angle (degrees)
   
   # Safety limits

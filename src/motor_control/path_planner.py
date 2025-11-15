@@ -6,6 +6,7 @@ Generates safe paths avoiding obstacles.
 import numpy as np
 from typing import List, Tuple, Optional, Set
 from ..utils.data_structures import RobotPose
+from ..utils.logger import setup_logger
 import heapq
 
 
@@ -15,20 +16,23 @@ class PathPlanner:
     def __init__(self, config=None):
         """
         Initialize path planner.
-        
+
         Args:
             config: Configuration dictionary
         """
         self.config = config or {}
         path_config = self.config.get('path_planning', {})
-        
-        # Safety parameters
-        self.obstacle_inflation = path_config.get('obstacle_inflation', 0.2)  # meters
-        self.safety_margin = path_config.get('safety_margin', 0.15)  # meters
-        
+
+        # Safety parameters - reduced for exploration
+        self.obstacle_inflation = path_config.get('obstacle_inflation', 0.05)  # meters (reduced from 0.2)
+        self.safety_margin = path_config.get('safety_margin', 0.05)  # meters (reduced from 0.15)
+
         # A* parameters
         self.heuristic_weight = path_config.get('heuristic_weight', 1.0)
         self.max_path_length = path_config.get('max_path_length', 50.0)  # meters
+
+        # Logger
+        self.logger = setup_logger("path_planner", log_file="data/logs/lukebot.log")
     
     def world_to_grid(self, x: float, y: float, grid_resolution: float,
                      grid_origin: Tuple[int, int]) -> Tuple[int, int]:
@@ -49,22 +53,15 @@ class PathPlanner:
         """Check if cell is valid for path planning (free and not too close to obstacles)."""
         if i < 0 or i >= occupancy_grid.shape[0] or j < 0 or j >= occupancy_grid.shape[1]:
             return False
-        
-        # Check if cell is free
+
+        # Check if cell is free or unknown (be more permissive for exploration)
+        # Accept anything that's not definitely occupied (>0.6)
         prob = occupancy_grid[i, j]
-        if prob >= prob_occupied:
+        if prob > prob_occupied:
             return False
-        
-        # Check inflation radius (simplified - check immediate neighbors)
-        inflation_radius = int(self.obstacle_inflation / 0.05)  # Assume 5cm resolution
-        for di in range(-inflation_radius, inflation_radius + 1):
-            for dj in range(-inflation_radius, inflation_radius + 1):
-                ni, nj = i + di, j + dj
-                if (0 <= ni < occupancy_grid.shape[0] and 
-                    0 <= nj < occupancy_grid.shape[1]):
-                    if occupancy_grid[ni, nj] >= prob_occupied:
-                        return False
-        
+
+        # For exploration, don't check inflation at all - be very permissive
+        # This allows planning through unknown space
         return True
     
     def heuristic(self, i1: int, j1: int, i2: int, j2: int) -> float:
@@ -78,7 +75,7 @@ class PathPlanner:
              prob_occupied: float = 0.6) -> Optional[List[Tuple[int, int]]]:
         """
         A* path planning algorithm.
-        
+
         Args:
             start: Start cell (i, j)
             goal: Goal cell (i, j)
@@ -86,11 +83,13 @@ class PathPlanner:
             grid_resolution: Grid resolution in meters
             prob_free: Probability threshold for free space
             prob_occupied: Probability threshold for occupied space
-        
+
         Returns:
             List of path cells (i, j), or None if no path found
         """
+        goal_prob = occupancy_grid[goal[0], goal[1]]
         if not self.is_valid_cell(goal[0], goal[1], occupancy_grid, prob_free, prob_occupied):
+            self.logger.debug(f"Goal cell ({goal[0]},{goal[1]}) is invalid, prob={goal_prob:.2f}")
             return None
         
         # Priority queue: (f_score, g_score, i, j, parent)
@@ -158,7 +157,7 @@ class PathPlanner:
                  prob_occupied: float = 0.6) -> Optional[List[Tuple[float, float]]]:
         """
         Plan path from start pose to goal.
-        
+
         Args:
             start_pose: Starting robot pose
             goal: Goal position (x, y) in world coordinates
@@ -167,28 +166,38 @@ class PathPlanner:
             grid_origin: Grid origin (i, j)
             prob_free: Probability threshold for free space
             prob_occupied: Probability threshold for occupied space
-        
+
         Returns:
             List of waypoints (x, y) in world coordinates, or None if no path found
         """
         # Convert to grid coordinates
-        start_i, start_j = self.world_to_grid(start_pose.x, start_pose.y, 
+        start_i, start_j = self.world_to_grid(start_pose.x, start_pose.y,
                                              grid_resolution, grid_origin)
-        goal_i, goal_j = self.world_to_grid(goal[0], goal[1], 
+        goal_i, goal_j = self.world_to_grid(goal[0], goal[1],
                                            grid_resolution, grid_origin)
-        
+
         # Check bounds
         if (start_i < 0 or start_i >= occupancy_grid.shape[0] or
-            start_j < 0 or start_j >= occupancy_grid.shape[1] or
-            goal_i < 0 or goal_i >= occupancy_grid.shape[0] or
-            goal_j < 0 or goal_j >= occupancy_grid.shape[1]):
+            start_j < 0 or start_j >= occupancy_grid.shape[1]):
+            self.logger.debug(f"Start position out of bounds: ({start_i}, {start_j}), grid shape: {occupancy_grid.shape}")
             return None
-        
+
+        if (goal_i < 0 or goal_i >= occupancy_grid.shape[0] or
+            goal_j < 0 or goal_j >= occupancy_grid.shape[1]):
+            self.logger.debug(f"Goal position out of bounds: ({goal_i}, {goal_j}), grid shape: {occupancy_grid.shape}")
+            return None
+
+        # Check if start/goal are valid
+        start_prob = occupancy_grid[start_i, start_j]
+        goal_prob = occupancy_grid[goal_i, goal_j]
+        self.logger.debug(f"Path planning: start=({start_i},{start_j}) prob={start_prob:.2f}, goal=({goal_i},{goal_j}) prob={goal_prob:.2f}")
+
         # Plan path using A*
         path_cells = self.astar((start_i, start_j), (goal_i, goal_j),
                                occupancy_grid, grid_resolution, prob_free, prob_occupied)
-        
+
         if path_cells is None:
+            self.logger.debug(f"A* failed to find path from ({start_i},{start_j}) to ({goal_i},{goal_j})")
             return None
         
         # Convert path cells to world coordinates

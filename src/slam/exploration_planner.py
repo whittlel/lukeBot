@@ -6,6 +6,7 @@ Detects unexplored frontiers and selects best targets for exploration.
 import numpy as np
 from typing import List, Tuple, Optional
 from ..utils.data_structures import RobotPose
+from ..utils.logger import setup_logger
 
 
 class ExplorationPlanner:
@@ -14,21 +15,24 @@ class ExplorationPlanner:
     def __init__(self, config=None):
         """
         Initialize exploration planner.
-        
+
         Args:
             config: Configuration dictionary
         """
         self.config = config or {}
         exploration_config = self.config.get('exploration', {})
-        
+
         # Frontier detection parameters
-        self.min_frontier_size = exploration_config.get('min_frontier_size', 5)
+        self.min_frontier_size = exploration_config.get('min_frontier_size', 3)  # Reduced from 5 to 3
         self.max_frontier_distance = exploration_config.get('max_frontier_distance', 10.0)
         self.exploration_radius = exploration_config.get('exploration_radius', 2.0)
-        
+
         # Information gain parameters
         self.distance_weight = exploration_config.get('distance_weight', 0.3)
         self.information_weight = exploration_config.get('information_weight', 0.7)
+
+        # Logger
+        self.logger = setup_logger("exploration_planner", log_file="data/logs/lukebot.log")
     
     def find_frontiers(self, occupancy_grid: np.ndarray, 
                       prob_free: float = 0.4, 
@@ -197,14 +201,19 @@ class ExplorationPlanner:
         """
         # Find frontiers
         frontiers = self.find_frontiers(occupancy_grid, prob_free, prob_occupied, prob_unknown)
-        
+
+        self.logger.debug(f"Found {len(frontiers)} frontier cells")
+
         if not frontiers:
             return None
-        
+
         # Cluster frontiers
         clusters = self.cluster_frontiers(frontiers)
-        
+
+        self.logger.debug(f"Clustered into {len(clusters)} frontier clusters")
+
         if not clusters:
+            self.logger.debug(f"No clusters large enough (min size: {self.min_frontier_size})")
             return None
         
         # Select best frontier
