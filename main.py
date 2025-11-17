@@ -16,7 +16,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.camera.oakd_camera import OakDCamera
-from src.camera.panoramic_camera import PanoramicCamera
 from src.slam.slam_engine import SLAMEngine
 from src.slam.exploration_planner import ExplorationPlanner
 from src.slam.obstacle_avoidance import ObstacleAvoidance
@@ -60,13 +59,9 @@ class LukeBot:
         # Initialize components
         self.logger.info("Initializing LukeBot...")
         
-        # Camera (main camera for SLAM/detection)
+        # Camera (with built-in panoramic view support)
         self.logger.info("Initializing camera...")
         self.camera = OakDCamera(config=camera_config)
-
-        # Panoramic camera (for wide FOV visualization)
-        self.logger.info("Initializing panoramic camera...")
-        self.panoramic_camera = PanoramicCamera(enable_depth=True)
         self.use_panoramic_view = True  # Toggle for panoramic display
         
         # SLAM
@@ -136,11 +131,6 @@ class LukeBot:
             self.logger.error("Failed to start camera")
             self.arduino.disconnect()
             return False
-
-        # Start panoramic camera
-        if not self.panoramic_camera.start():
-            self.logger.warning("Failed to start panoramic camera, continuing with main camera only")
-            self.use_panoramic_view = False
         
         # Set camera intrinsics in SLAM
         camera_matrix = self.camera.get_camera_intrinsics()
@@ -169,10 +159,6 @@ class LukeBot:
 
         # Stop camera
         self.camera.stop()
-
-        # Stop panoramic camera
-        if self.panoramic_camera:
-            self.panoramic_camera.stop()
 
         # Disconnect Arduino
         self.arduino.disconnect()
@@ -227,23 +213,15 @@ class LukeBot:
                         self._autonomous_exploration(pose, data['rgb'])
                 
                 # Prepare display frame
-                if self.use_panoramic_view and self.panoramic_camera.is_running():
-                    # Get panoramic camera frames
-                    pano_rgb, pano_left, pano_right, pano_depth = self.panoramic_camera.get_frames()
+                # Draw detections first
+                frame_with_detections = self.camera.draw_detections(data['rgb'], data['detections'])
 
-                    if pano_rgb is not None:
-                        # Create panoramic view with detections
-                        # Draw detections on center RGB frame before stitching
-                        rgb_with_detections = self.camera.draw_detections(pano_rgb.copy(), data['detections'])
-                        frame = self.panoramic_camera.create_panoramic_view(
-                            rgb_with_detections, pano_left, pano_right, add_labels=True
-                        )
-                    else:
-                        # Fallback to regular camera
-                        frame = self.camera.draw_detections(data['rgb'], data['detections'])
+                if self.use_panoramic_view:
+                    # Create panoramic view using built-in camera stitching
+                    frame = self.camera.create_panoramic_view(frame_with_detections, add_labels=True)
                 else:
                     # Regular single camera view
-                    frame = self.camera.draw_detections(data['rgb'], data['detections'])
+                    frame = frame_with_detections
 
                 # Display FPS
                 frame_count += 1
@@ -263,10 +241,7 @@ class LukeBot:
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
                 # Display mode indicator
-                mode_text = "PANORAMIC VIEW" if self.use_panoramic_view else "SINGLE CAMERA"
-                if self.use_panoramic_view and self.panoramic_camera.is_running():
-                    total_fov = self.panoramic_camera.get_total_fov()
-                    mode_text += f" (~{total_fov:.0f}° FOV)"
+                mode_text = "PANORAMIC VIEW (~105° FOV)" if self.use_panoramic_view else "SINGLE CAMERA (69° FOV)"
                 cv2.putText(frame, mode_text, (10, frame.shape[0] - 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
@@ -305,12 +280,9 @@ class LukeBot:
                         self.current_path = None
                 elif key == ord('v'):
                     # Toggle panoramic view
-                    if self.panoramic_camera.is_running():
-                        self.use_panoramic_view = not self.use_panoramic_view
-                        self.logger.info(f"Panoramic view: {self.use_panoramic_view}")
-                        print(f"View mode: {'PANORAMIC' if self.use_panoramic_view else 'SINGLE CAMERA'}")
-                    else:
-                        self.logger.warning("Panoramic camera not running")
+                    self.use_panoramic_view = not self.use_panoramic_view
+                    self.logger.info(f"Panoramic view: {self.use_panoramic_view}")
+                    print(f"View mode: {'PANORAMIC (~105° FOV)' if self.use_panoramic_view else 'SINGLE CAMERA (69° FOV)'}")
 
                 time.sleep(0.05)  # Increased from 0.01 to 0.05 to reduce loop rate
         
@@ -327,16 +299,8 @@ class LukeBot:
         import random
 
         # Get depth data to check for obstacles
-        # Use panoramic camera if available for wider FOV obstacle detection
-        if self.use_panoramic_view and self.panoramic_camera.is_running():
-            _, _, _, depth_frame = self.panoramic_camera.get_frames()
-            if depth_frame is None:
-                # Fallback to main camera
-                data = self.camera.get_all_data()
-                depth_frame = data.get('depth')
-        else:
-            data = self.camera.get_all_data()
-            depth_frame = data.get('depth')
+        data = self.camera.get_all_data()
+        depth_frame = data.get('depth')
 
         obstacle_detected = False
         detection_reason = ""

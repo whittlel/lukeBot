@@ -79,12 +79,16 @@ class OakDCamera:
         self.q_video = None
         self.q_nn = None
         self.q_depth = None
+        self.q_left = None
+        self.q_right = None
         
         # Frame queues
         self.frame_queue = queue.Queue(maxsize=2)
         self.detection_queue = queue.Queue(maxsize=2)
         self.depth_queue = queue.Queue(maxsize=2)
         self.imu_queue = queue.Queue(maxsize=2)
+        self.left_queue = queue.Queue(maxsize=2)
+        self.right_queue = queue.Queue(maxsize=2)
         
         # FPS tracking
         self.fps = 0.0
@@ -217,14 +221,23 @@ class OakDCamera:
         xout_video = pipeline.create(dai.node.XLinkOut)
         xout_video.setStreamName("video")
         cam.video.link(xout_video.input)
-        
+
         xout_nn = pipeline.create(dai.node.XLinkOut)
         xout_nn.setStreamName("nn")
         detection_nn.out.link(xout_nn.input)
-        
+
         xout_depth = pipeline.create(dai.node.XLinkOut)
         xout_depth.setStreamName("depth")
         stereo.depth.link(xout_depth.input)
+
+        # Add panoramic view outputs (stereo camera feeds)
+        xout_left = pipeline.create(dai.node.XLinkOut)
+        xout_left.setStreamName("left")
+        mono_left.out.link(xout_left.input)
+
+        xout_right = pipeline.create(dai.node.XLinkOut)
+        xout_right.setStreamName("right")
+        mono_right.out.link(xout_right.input)
         
         # Add IMU node if enabled
         if self.enable_imu:
@@ -254,6 +267,8 @@ class OakDCamera:
             self.q_video = self.device.getOutputQueue(name="video", maxSize=4, blocking=False)
             self.q_nn = self.device.getOutputQueue(name="nn", maxSize=4, blocking=False)
             self.q_depth = self.device.getOutputQueue(name="depth", maxSize=4, blocking=False)
+            self.q_left = self.device.getOutputQueue(name="left", maxSize=4, blocking=False)
+            self.q_right = self.device.getOutputQueue(name="right", maxSize=4, blocking=False)
             
             if self.enable_imu:
                 self.q_imu = self.device.getOutputQueue(name="imu", maxSize=4, blocking=False)
@@ -338,7 +353,17 @@ class OakDCamera:
                     in_depth = self.q_depth.tryGet()
                     if in_depth is not None:
                         depth_frame = in_depth.getFrame()
-                    
+
+                    # Get stereo camera frames for panoramic view
+                    left_frame = None
+                    right_frame = None
+                    in_left = self.q_left.tryGet()
+                    if in_left is not None:
+                        left_frame = in_left.getCvFrame()
+                    in_right = self.q_right.tryGet()
+                    if in_right is not None:
+                        right_frame = in_right.getCvFrame()
+
                     # Get IMU data
                     imu_data = None
                     if self.q_imu is not None:
@@ -420,7 +445,25 @@ class OakDCamera:
                             self.imu_queue.put_nowait(imu_data)
                         except:
                             pass
-                
+
+                    try:
+                        self.left_queue.put_nowait(left_frame)
+                    except queue.Full:
+                        try:
+                            self.left_queue.get_nowait()
+                            self.left_queue.put_nowait(left_frame)
+                        except:
+                            pass
+
+                    try:
+                        self.right_queue.put_nowait(right_frame)
+                    except queue.Full:
+                        try:
+                            self.right_queue.get_nowait()
+                            self.right_queue.put_nowait(right_frame)
+                        except:
+                            pass
+
                 time.sleep(0.01)
             except Exception as e:
                 if self.running:
@@ -530,10 +573,91 @@ class OakDCamera:
         
         return frame
     
+    def get_stereo_frames(self):
+        """Get stereo camera frames for panoramic view."""
+        try:
+            left_frame = self.left_queue.get_nowait()
+        except queue.Empty:
+            left_frame = None
+
+        try:
+            right_frame = self.right_queue.get_nowait()
+        except queue.Empty:
+            right_frame = None
+
+        return left_frame, right_frame
+
+    def create_panoramic_view(self, rgb_frame, left_frame=None, right_frame=None, add_labels=True):
+        """
+        Create panoramic view by stitching RGB and stereo frames.
+
+        Args:
+            rgb_frame: RGB frame from center camera
+            left_frame: Left stereo frame (optional, will fetch if None)
+            right_frame: Right stereo frame (optional, will fetch if None)
+            add_labels: Whether to add camera labels
+
+        Returns:
+            Stitched panoramic image
+        """
+        if rgb_frame is None:
+            return None
+
+        # Fetch stereo frames if not provided
+        if left_frame is None or right_frame is None:
+            left_frame, right_frame = self.get_stereo_frames()
+
+        target_height = rgb_frame.shape[0]
+        frames = []
+
+        # Left camera
+        if left_frame is not None:
+            left_bgr = cv2.cvtColor(left_frame, cv2.COLOR_GRAY2BGR)
+            aspect = left_bgr.shape[1] / left_bgr.shape[0]
+            new_width = int(target_height * aspect)
+            left_resized = cv2.resize(left_bgr, (new_width, target_height))
+            frames.append(left_resized)
+
+        # RGB center
+        frames.append(rgb_frame)
+
+        # Right camera
+        if right_frame is not None:
+            right_bgr = cv2.cvtColor(right_frame, cv2.COLOR_GRAY2BGR)
+            aspect = right_bgr.shape[1] / right_bgr.shape[0]
+            new_width = int(target_height * aspect)
+            right_resized = cv2.resize(right_bgr, (new_width, target_height))
+            frames.append(right_resized)
+
+        # Stitch horizontally
+        panorama = np.hstack(frames) if len(frames) > 1 else frames[0]
+
+        # Add labels if requested
+        if add_labels:
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            thickness = 2
+
+            x_offset = 0
+            if left_frame is not None:
+                cv2.putText(panorama, "LEFT", (x_offset + 10, 35),
+                           font, font_scale, (0, 255, 255), thickness)
+                x_offset += left_resized.shape[1]
+
+            cv2.putText(panorama, "RGB", (x_offset + 10, 35),
+                       font, font_scale, (0, 255, 0), thickness)
+            x_offset += rgb_frame.shape[1]
+
+            if right_frame is not None:
+                cv2.putText(panorama, "RIGHT", (x_offset + 10, 35),
+                           font, font_scale, (255, 255, 0), thickness)
+
+        return panorama
+
     def is_running(self):
         """Check if camera is running."""
         return self.running
-    
+
     @property
     def yolo_detector(self):
         """Compatibility property for accessing detector-like attributes."""
