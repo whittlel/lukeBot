@@ -2,12 +2,31 @@
 # Visual SLAM using stereo camera data
 
 slam:
+  # Odometry Mode Selection
+  # Options: 'depth', 'visual', 'hybrid'
+  # - depth: Use depth-based ICP (best for low-texture environments)
+  # - visual: Use feature-based visual odometry (legacy)
+  # - hybrid: Try depth first, fallback to visual
+  odometry_mode: "hybrid"
+
+  # Depth Odometry Settings (ICP-based)
+  depth_odometry:
+    icp_max_iterations: 3             # Reduced from 5 for Jetson Nano performance
+    icp_convergence: 0.01             # Relaxed for faster convergence
+    max_correspondence_distance: 0.2  # meters - larger for faster matching
+    sample_rate: 25                   # Balanced: better than 30, faster than 15
+    min_depth: 0.1                    # meters
+    max_depth: 5.0                    # meters - increased for better coverage
+    min_points: 30                    # Reduced to accept more marginal frames
+    use_imu: true
+    imu_alpha: 0.7                    # Weight for IMU fusion (higher = trust IMU more)
+
   # Visual Odometry Settings
   visual_odometry:
     # Feature detector
     detector_type: "ORB"  # Options: ORB, SIFT, SURF
-    max_features: 500     # Maximum number of features to detect (reduced for Jetson performance)
-    quality_level: 0.01   # Quality level for feature detection
+    max_features: 300     # Maximum number of features to detect
+    quality_level: 0.01   # Quality level for feature detection (lower = more features)
     
     # Feature matcher
     matcher_type: "BF"    # Brute Force matcher
@@ -76,9 +95,9 @@ slam:
   performance:
     # Processing rate
     process_rate: 10  # Hz (frames per second to process)
-    
+
     # Keyframe selection
-    keyframe_interval: 5  # Process every Nth frame
+    keyframe_interval: 5  # Process every Nth frame (increased for Jetson Nano performance)
     min_movement: 0.1     # Minimum movement (meters) before new keyframe
     
     # Threading

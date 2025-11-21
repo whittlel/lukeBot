@@ -48,7 +48,9 @@ class MapBuilder:
         
         # Initialize occupancy grid
         if self.map_type == 'occupancy_grid':
-            self.occupancy_grid = np.full(self.grid_size, self.prob_unknown, dtype=np.float32)
+            # grid_size is [width, height], but numpy needs (rows, cols) = (height, width)
+            self.occupancy_grid = np.full((self.grid_size[1], self.grid_size[0]),
+                                         self.prob_unknown, dtype=np.float32)
             self.trajectory = []  # List of robot poses
         else:
             self.occupancy_grid = None
@@ -66,29 +68,33 @@ class MapBuilder:
     def world_to_grid(self, x: float, y: float) -> Tuple[int, int]:
         """
         Convert world coordinates to grid coordinates.
-        
+
         Args:
             x, y: World coordinates (meters)
-        
+
         Returns:
-            Grid coordinates (i, j)
+            Grid coordinates (row, col) for numpy array indexing
         """
-        i = int(self.grid_origin[0] + x / self.grid_resolution)
-        j = int(self.grid_origin[1] + y / self.grid_resolution)
-        return i, j
+        # NumPy arrays use [row, col] indexing where:
+        # - row corresponds to Y axis (vertical)
+        # - col corresponds to X axis (horizontal)
+        col = int(self.grid_origin[0] + x / self.grid_resolution)
+        row = int(self.grid_origin[1] + y / self.grid_resolution)
+        return row, col
     
-    def grid_to_world(self, i: int, j: int) -> Tuple[float, float]:
+    def grid_to_world(self, row: int, col: int) -> Tuple[float, float]:
         """
         Convert grid coordinates to world coordinates.
-        
+
         Args:
-            i, j: Grid coordinates
-        
+            row, col: Grid coordinates (numpy array indices)
+
         Returns:
             World coordinates (x, y) in meters
         """
-        x = (i - self.grid_origin[0]) * self.grid_resolution
-        y = (j - self.grid_origin[1]) * self.grid_resolution
+        # Inverse of world_to_grid: col->x, row->y
+        x = (col - self.grid_origin[0]) * self.grid_resolution
+        y = (row - self.grid_origin[1]) * self.grid_resolution
         return x, y
     
     def set_camera_intrinsics(self, camera_matrix: np.ndarray, dist_coeffs: Optional[np.ndarray] = None):
@@ -115,12 +121,13 @@ class MapBuilder:
         
         # Add pose to trajectory
         self.trajectory.append(pose)
-        
+
         # Update grid at robot position (free space)
-        i, j = self.world_to_grid(pose.x, pose.y)
-        if 0 <= i < self.grid_size[0] and 0 <= j < self.grid_size[1]:
+        robot_row, robot_col = self.world_to_grid(pose.x, pose.y)
+        # Check bounds: grid shape is (rows, cols) = (height, width)
+        if 0 <= robot_row < self.occupancy_grid.shape[0] and 0 <= robot_col < self.occupancy_grid.shape[1]:
             # Robot position is free
-            self.occupancy_grid[i, j] = self.prob_free
+            self.occupancy_grid[robot_row, robot_col] = self.prob_free
         
         # Process depth map to update obstacles
         if depth_map is not None and self.camera_matrix is not None:
@@ -131,6 +138,15 @@ class MapBuilder:
         if self.camera_matrix is None:
             return
 
+        # Debug logging for pose
+        if not hasattr(self, '_map_update_count'):
+            self._map_update_count = 0
+
+        if self._map_update_count == 0:
+            print(f"[MAP] Starting map updates with robot at pose({pose.x:.2f}, {pose.y:.2f}, {np.degrees(pose.theta):.1f}deg)")
+
+        self._map_update_count += 1
+
         # Ensure camera_matrix is a numpy array
         camera_matrix = self.camera_matrix
         if not isinstance(camera_matrix, np.ndarray):
@@ -140,82 +156,120 @@ class MapBuilder:
         fy = camera_matrix[1, 1]
         cx = camera_matrix[0, 2]
         cy = camera_matrix[1, 2]
-        
+
         # Sample depth points (every Nth pixel for performance)
         step = max(1, min(depth_map.shape[0] // 50, depth_map.shape[1] // 50))
-        
+
+        # Pre-compute rotation for this pose
+        cos_theta = np.cos(pose.theta)
+        sin_theta = np.sin(pose.theta)
+
+        # Log pose every 20 updates
+        if self._map_update_count % 20 == 1:
+            print(f"[MAP] Update #{self._map_update_count}: robot at ({pose.x:.2f}, {pose.y:.2f}, {np.degrees(pose.theta):.1f}deg) cos={cos_theta:.3f} sin={sin_theta:.3f}")
+
         for y in range(0, depth_map.shape[0], step):
             for x in range(0, depth_map.shape[1], step):
                 depth = depth_map[y, x]
-                
+
                 # Skip invalid depth
-                if depth <= 0.1 or depth > 10.0:
+                # Minimum 0.3m to avoid detecting robot chassis/camera mount
+                if depth < 0.3 or depth > 10.0:
                     continue
-                
+
                 # Convert pixel to 3D point in camera frame
                 # Camera frame: X right, Y down, Z forward
                 x_cam = (x - cx) * depth / fx
                 y_cam = (y - cy) * depth / fy
                 z_cam = depth
-                
+
                 # Transform to world frame (robot frame)
                 # Robot frame: X forward, Y left, Z up
                 # Camera is mounted on robot, assume camera forward = robot forward
                 # For 2D mapping, we project to XY plane
-                cos_theta = np.cos(pose.theta)
-                sin_theta = np.sin(pose.theta)
-                
+
                 # Transform to world coordinates
-                x_world = pose.x + z_cam * cos_theta - x_cam * sin_theta
-                y_world = pose.y + z_cam * sin_theta + x_cam * cos_theta
+                # Proper 2D rotation: camera forward(z)->robot_x, camera right(x)->-robot_y
+                x_world = pose.x + z_cam * cos_theta + x_cam * sin_theta
+                y_world = pose.y + z_cam * sin_theta - x_cam * cos_theta
                 
                 # Convert to grid coordinates
-                i, j = self.world_to_grid(x_world, y_world)
-                
+                obs_row, obs_col = self.world_to_grid(x_world, y_world)
+
+                # Diagnostic logging for first few points (only once per session)
+                if not hasattr(self, '_debug_logged'):
+                    if not hasattr(self, '_debug_count'):
+                        self._debug_count = 0
+
+                    if self._debug_count < 3:  # Log first 3 points only
+                        print(f"[MAP] Depth point #{self._debug_count}: " +
+                              f"cam_px({x}, {y}, depth={depth:.2f}m) → " +
+                              f"cam3d({x_cam:.2f}, {y_cam:.2f}, {z_cam:.2f}m) → " +
+                              f"world({x_world:.2f}, {y_world:.2f}m) → " +
+                              f"grid(row={obs_row}, col={obs_col}) | " +
+                              f"Robot: pose({pose.x:.2f}, {pose.y:.2f}m, {np.degrees(pose.theta):.1f}deg)")
+                        self._debug_count += 1
+                        if self._debug_count >= 3:
+                            self._debug_logged = True
+                            print("[MAP] Coordinate transformation diagnostics complete")
+
                 # Raycast from robot to obstacle
-                robot_i, robot_j = self.world_to_grid(pose.x, pose.y)
-                
+                robot_row, robot_col = self.world_to_grid(pose.x, pose.y)
+
                 # Mark cells along ray as free
-                self._raycast_free_space(robot_i, robot_j, i, j)
-                
+                self._raycast_free_space(robot_row, robot_col, obs_row, obs_col)
+
                 # Mark obstacle cell as occupied
-                if 0 <= i < self.grid_size[0] and 0 <= j < self.grid_size[1]:
+                # Check bounds using actual grid shape (rows, cols)
+                if 0 <= obs_row < self.occupancy_grid.shape[0] and 0 <= obs_col < self.occupancy_grid.shape[1]:
                     # Update with probabilistic occupancy
-                    current_prob = self.occupancy_grid[i, j]
+                    current_prob = self.occupancy_grid[obs_row, obs_col]
                     if current_prob < 0.5:  # Unknown or free
-                        self.occupancy_grid[i, j] = min(1.0, current_prob + self.prob_occupied * 0.1)
+                        self.occupancy_grid[obs_row, obs_col] = min(1.0, current_prob + self.prob_occupied * 0.1)
                     else:  # Already occupied
-                        self.occupancy_grid[i, j] = min(1.0, current_prob + self.prob_occupied * 0.05)
+                        self.occupancy_grid[obs_row, obs_col] = min(1.0, current_prob + self.prob_occupied * 0.05)
     
-    def _raycast_free_space(self, x0: int, y0: int, x1: int, y1: int):
-        """Mark cells along ray as free space using Bresenham's line algorithm."""
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx - dy
-        
-        x, y = x0, y0
-        
+    def _raycast_free_space(self, row0: int, col0: int, row1: int, col1: int):
+        """Mark cells along ray as free space using Bresenham's line algorithm.
+
+        Args:
+            row0, col0: Starting grid cell (robot position)
+            row1, col1: Ending grid cell (obstacle position)
+        """
+        drow = abs(row1 - row0)
+        dcol = abs(col1 - col0)
+        srow = 1 if row0 < row1 else -1
+        scol = 1 if col0 < col1 else -1
+        err = dcol - drow
+
+        row, col = row0, col0
+
         while True:
             # Mark cell as free (but don't mark the obstacle itself)
-            if (x, y) != (x1, y1) and 0 <= x < self.grid_size[0] and 0 <= y < self.grid_size[1]:
-                current_prob = self.occupancy_grid[x, y]
-                if current_prob > 0.5:  # Unknown or occupied
-                    self.occupancy_grid[x, y] = max(0.0, current_prob - self.prob_free * 0.1)
-                else:  # Already free
-                    self.occupancy_grid[x, y] = max(0.0, current_prob - self.prob_free * 0.05)
-            
-            if x == x1 and y == y1:
+            if ((row, col) != (row1, col1) and
+                0 <= row < self.occupancy_grid.shape[0] and
+                0 <= col < self.occupancy_grid.shape[1]):
+
+                current_prob = self.occupancy_grid[row, col]
+                # Conservative free space marking - don't aggressively clear occupied cells
+                if current_prob >= 0.6:  # Definitely occupied - DON'T clear it
+                    # Once marked as occupied, keep it (persistent obstacles)
+                    pass
+                elif current_prob >= 0.5:  # Unknown - mark as free
+                    self.occupancy_grid[row, col] = max(0.0, current_prob - 0.10)
+                else:  # Already free - reinforce it slightly
+                    self.occupancy_grid[row, col] = max(0.0, current_prob - 0.02)
+
+            if row == row1 and col == col1:
                 break
-            
+
             e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x += sx
-            if e2 < dx:
-                err += dx
-                y += sy
+            if e2 > -drow:
+                err -= drow
+                col += scol
+            if e2 < dcol:
+                err += dcol  # Fixed: was 'drow', should be 'dcol'
+                row += srow
     
     def add_point_cloud_point(self, point: MapPoint):
         """Add point to point cloud."""
