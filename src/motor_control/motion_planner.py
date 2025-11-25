@@ -94,12 +94,12 @@ class MotionPlanner:
         if speed is None:
             speed = self.default_turn_speed
         speed = max(0, min(100, speed))
-        
+
         if angle is None:
             angle = 90.0  # Default turn angle
-        
-        # TODO: Implement angle-based turning when odometry is available
-        return self.arduino.turn_left(angle)
+
+        # Send turn command with speed control
+        return self.arduino.turn_left(angle, speed)
     
     def turn_right(self, angle: Optional[float] = None, speed: Optional[int] = None) -> bool:
         """
@@ -115,12 +115,12 @@ class MotionPlanner:
         if speed is None:
             speed = self.default_turn_speed
         speed = max(0, min(100, speed))
-        
+
         if angle is None:
             angle = 90.0  # Default turn angle
-        
-        # TODO: Implement angle-based turning when odometry is available
-        return self.arduino.turn_right(angle)
+
+        # Send turn command with speed control
+        return self.arduino.turn_right(angle, speed)
     
     def stop(self) -> bool:
         """Stop robot movement."""

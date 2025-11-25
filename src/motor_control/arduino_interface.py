@@ -168,13 +168,19 @@ class ArduinoInterface:
             return False
         return self.send_command(f"MOVE_BACKWARD,{speed}")
     
-    def turn_left(self, angle: float) -> bool:
-        """Send turn left command."""
-        return self.send_command(f"TURN_LEFT,{angle}")
-    
-    def turn_right(self, angle: float) -> bool:
-        """Send turn right command."""
-        return self.send_command(f"TURN_RIGHT,{angle}")
+    def turn_left(self, angle: float, speed: int = 50) -> bool:
+        """Send turn left command with speed control."""
+        if speed < 0 or speed > 100:
+            print(f"[ERROR] Speed must be between 0 and 100, got {speed}")
+            return False
+        return self.send_command(f"TURN_LEFT,{angle},{speed}")
+
+    def turn_right(self, angle: float, speed: int = 50) -> bool:
+        """Send turn right command with speed control."""
+        if speed < 0 or speed > 100:
+            print(f"[ERROR] Speed must be between 0 and 100, got {speed}")
+            return False
+        return self.send_command(f"TURN_RIGHT,{angle},{speed}")
     
     def stop(self) -> bool:
         """Send stop command."""

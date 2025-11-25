@@ -190,8 +190,9 @@ class MapBuilder:
 
                 # Transform to world coordinates
                 # Proper 2D rotation: camera forward(z)->robot_x, camera right(x)->-robot_y
-                x_world = pose.x + z_cam * cos_theta + x_cam * sin_theta
-                y_world = pose.y + z_cam * sin_theta - x_cam * cos_theta
+                # Rotation matrix [cos -sin; sin cos] transforms camera frame to world frame
+                x_world = pose.x + z_cam * cos_theta - x_cam * sin_theta
+                y_world = pose.y + z_cam * sin_theta + x_cam * cos_theta
                 
                 # Convert to grid coordinates
                 obs_row, obs_col = self.world_to_grid(x_world, y_world)

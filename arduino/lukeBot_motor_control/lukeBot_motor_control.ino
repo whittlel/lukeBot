@@ -39,6 +39,10 @@ const int L298N2_ENB = 44; // PWM (changed from 13 - pin 13 has built-in LED)
 const int MIN_SPEED = 30;
 const int MAX_SPEED = 255;
 
+// Rotation rate calibration (degrees per second at speed=50)
+// This is an estimate - tune based on actual robot behavior
+const float ROTATION_RATE_AT_50_SPEED = 30.0;  // degrees/second at speed=50
+
 void setup() {
   Serial.begin(115200);
 
@@ -105,12 +109,38 @@ void parseCommand(String command) {
     moveBackward(speed);
   }
   else if (cmd == "TURN_LEFT") {
-    float angle = (param.length() > 0) ? param.toFloat() : 90.0;
-    turnLeft(angle);
+    // Parse angle,speed format (e.g., "90,30" = 90 degrees at 30% speed)
+    float angle = 90.0;  // default
+    int speed = 50;      // default
+
+    if (param.length() > 0) {
+      int commaIndex = param.indexOf(',');
+      if (commaIndex > 0) {
+        angle = param.substring(0, commaIndex).toFloat();
+        speed = param.substring(commaIndex + 1).toInt();
+      } else {
+        angle = param.toFloat();
+      }
+    }
+    speed = constrain(speed, 0, 100);
+    turnLeft(angle, speed);
   }
   else if (cmd == "TURN_RIGHT") {
-    float angle = (param.length() > 0) ? param.toFloat() : 90.0;
-    turnRight(angle);
+    // Parse angle,speed format (e.g., "90,30" = 90 degrees at 30% speed)
+    float angle = 90.0;  // default
+    int speed = 50;      // default
+
+    if (param.length() > 0) {
+      int commaIndex = param.indexOf(',');
+      if (commaIndex > 0) {
+        angle = param.substring(0, commaIndex).toFloat();
+        speed = param.substring(commaIndex + 1).toInt();
+      } else {
+        angle = param.toFloat();
+      }
+    }
+    speed = constrain(speed, 0, 100);
+    turnRight(angle, speed);
   }
   else if (cmd == "STOP") {
     stopAllMotors();
@@ -165,8 +195,9 @@ void moveBackward(int speed) {
   Serial.println(speed);
 }
 
-void turnLeft(float angle) {
-  int pwm = map(50, 0, 100, MIN_SPEED, MAX_SPEED);
+void turnLeft(float angle, int speed) {
+  speed = constrain(speed, 0, 100);
+  int pwm = map(speed, 0, 100, MIN_SPEED, MAX_SPEED);
 
   // Left wheels backward, right wheels forward
   digitalWrite(L298N1_IN1, LOW);
@@ -185,11 +216,14 @@ void turnLeft(float angle) {
 
   Serial.print("OK: Turning left ");
   Serial.print(angle);
-  Serial.println(" degrees");
+  Serial.print(" degrees at speed ");
+  Serial.println(speed);
+  // Note: Python controls timing via STOP command, no delay here
 }
 
-void turnRight(float angle) {
-  int pwm = map(50, 0, 100, MIN_SPEED, MAX_SPEED);
+void turnRight(float angle, int speed) {
+  speed = constrain(speed, 0, 100);
+  int pwm = map(speed, 0, 100, MIN_SPEED, MAX_SPEED);
 
   // Left wheels forward, right wheels backward
   digitalWrite(L298N1_IN1, HIGH);
@@ -208,7 +242,9 @@ void turnRight(float angle) {
 
   Serial.print("OK: Turning right ");
   Serial.print(angle);
-  Serial.println(" degrees");
+  Serial.print(" degrees at speed ");
+  Serial.println(speed);
+  // Note: Python controls timing via STOP command, no delay here
 }
 
 void stopAllMotors() {

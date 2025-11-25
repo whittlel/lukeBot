@@ -45,6 +45,10 @@ class DepthOdometry:
         self.use_imu = depth_config.get('use_imu', True)
         self.imu_alpha = depth_config.get('imu_alpha', 0.7)  # Weight for IMU vs ICP
 
+        # IMU continuous integration buffer
+        self.imu_buffer = []  # List of (timestamp, gyro_x, gyro_y, gyro_z) tuples
+        self.last_imu_integration_time = None
+
     def set_camera_intrinsics(self, camera_matrix: np.ndarray, dist_coeffs: Optional[np.ndarray] = None):
         """Set camera intrinsics for depth unprojection."""
         self.camera_matrix = camera_matrix
@@ -221,14 +225,14 @@ class DepthOdometry:
 
     def estimate_pose(self, depth_image: np.ndarray,
                      rgb_image: Optional[np.ndarray] = None,
-                     imu_data: Optional[dict] = None) -> Optional[RobotPose]:
+                     imu_data: Optional[list] = None) -> Optional[RobotPose]:
         """
         Estimate pose change using ICP on depth point clouds.
 
         Args:
             depth_image: Current depth map in meters
             rgb_image: Optional RGB image
-            imu_data: Optional IMU data dictionary
+            imu_data: Optional list of IMU data dictionaries (for continuous integration)
 
         Returns:
             Delta pose or None if estimation fails
@@ -268,18 +272,50 @@ class DepthOdometry:
             dx = t[2, 0]   # Forward/backward (camera Z-axis)
             dy = -t[0, 0]  # Left/right (negative camera X-axis)
 
-            # Extract rotation around Z-axis (yaw)
-            dtheta = np.arctan2(R[1, 0], R[0, 0])
+            # Extract rotation around vertical axis (yaw)
+            # Try multiple methods and log for debugging
+
+            # Method 1: Rodrigues decomposition
+            rvec, _ = cv2.Rodrigues(R)
+            dtheta_rodrigues = rvec[1, 0]  # Y-axis rotation
+
+            # Method 2: Direct arctan2 from rotation matrix (XZ plane projection)
+            dtheta_arctan2 = np.arctan2(-R[0, 2], R[0, 0])
+
+            # Method 3: Original formula (for comparison)
+            dtheta_original = np.arctan2(R[1, 0], R[0, 0])
+
+            # Use Method 2 for now (seems most appropriate for ground robot)
+            dtheta = dtheta_arctan2
 
             # Create delta pose
             delta_pose = RobotPose(dx, dy, dtheta)
 
-            # Diagnostic logging
+            # ALWAYS log rotation details for first 20 frames
+            if not hasattr(self, '_rot_debug_count'):
+                self._rot_debug_count = 0
+            self._rot_debug_count += 1
+
+            if self._rot_debug_count <= 20:
+                print(f"[DEPTH] === Rotation Debug #{self._rot_debug_count} ===")
+                print(f"[DEPTH] R matrix: [{R[0,0]:.4f} {R[0,1]:.4f} {R[0,2]:.4f}]")
+                print(f"[DEPTH]           [{R[1,0]:.4f} {R[1,1]:.4f} {R[1,2]:.4f}]")
+                print(f"[DEPTH]           [{R[2,0]:.4f} {R[2,1]:.4f} {R[2,2]:.4f}]")
+                print(f"[DEPTH] Rodrigues rvec=[{rvec[0,0]:.4f}, {rvec[1,0]:.4f}, {rvec[2,0]:.4f}]")
+                print(f"[DEPTH] Method 1 (Rodrigues Y): {np.degrees(dtheta_rodrigues):.2f}°")
+                print(f"[DEPTH] Method 2 (arctan2 XZ): {np.degrees(dtheta_arctan2):.2f}°")
+                print(f"[DEPTH] Method 3 (original):   {np.degrees(dtheta_original):.2f}°")
+
             print(f"[DEPTH] Delta: dx={dx:.3f}m, dy={dy:.3f}m, dtheta={np.degrees(dtheta):.1f}deg")
 
             # Fuse with IMU if available
             if self.use_imu and imu_data is not None:
+                original_theta = delta_pose.theta
                 delta_pose = self._fuse_imu(delta_pose, imu_data)
+                if self._rot_debug_count <= 20:
+                    print(f"[IMU] Before fusion: {np.degrees(original_theta):.2f}°, After fusion: {np.degrees(delta_pose.theta):.2f}°")
+            elif self._rot_debug_count <= 20:
+                print(f"[IMU] IMU fusion disabled or no data: use_imu={self.use_imu}, imu_data={'None' if imu_data is None else 'available'}")
 
             # Update previous cloud
             self.prev_point_cloud = current_cloud
@@ -292,26 +328,68 @@ class DepthOdometry:
             traceback.print_exc()
             return None
 
-    def _fuse_imu(self, depth_pose: RobotPose, imu_data: dict) -> RobotPose:
-        """Fuse IMU data with depth odometry estimate."""
-        if imu_data is None or imu_data.get('gyro') is None:
+    def _fuse_imu(self, depth_pose: RobotPose, imu_data_list: list) -> RobotPose:
+        """
+        Fuse IMU data with depth odometry estimate.
+
+        Args:
+            depth_pose: Pose estimate from ICP
+            imu_data_list: List of IMU data dictionaries collected between keyframes
+
+        Returns:
+            Fused pose estimate
+        """
+        if not imu_data_list or len(imu_data_list) == 0:
+            if not hasattr(self, '_imu_warn_count'):
+                self._imu_warn_count = 0
+            self._imu_warn_count += 1
+            if self._imu_warn_count <= 5:
+                print(f"[IMU] No IMU buffer data available!")
             return depth_pose
 
-        # Get gyroscope data for rotation
-        gyro = imu_data['gyro']
+        # Debug logging
+        if not hasattr(self, '_imu_fusion_count'):
+            self._imu_fusion_count = 0
+        self._imu_fusion_count += 1
 
-        # For 2D motion, use Z-axis rotation
-        if hasattr(gyro, 'z'):
-            # Time difference (assume 30 FPS = 0.033s)
-            dt = 0.033
-            imu_dtheta = gyro.z * dt
+        # Integrate all IMU samples from buffer
+        total_imu_dtheta = 0.0
+        dt = 1.0 / 100.0  # IMU samples at 100 Hz = 0.01s per sample
+        sample_count = 0
 
-            # Fuse rotation estimates (trust IMU more for rotation)
-            fused_theta = self.imu_alpha * imu_dtheta + (1 - self.imu_alpha) * depth_pose.theta
+        for imu_data in imu_data_list:
+            if imu_data is None or imu_data.get('gyro') is None:
+                continue
 
-            return RobotPose(depth_pose.x, depth_pose.y, fused_theta)
+            gyro = imu_data['gyro']
+            if not hasattr(gyro, 'x'):
+                continue
 
-        return depth_pose
+            # Use X-axis (this robot's yaw axis based on testing)
+            gyro_x = gyro.x
+            imu_dtheta_x = gyro_x * dt
+            total_imu_dtheta += imu_dtheta_x
+            sample_count += 1
+
+            # Debug logging for first few samples
+            if self._imu_fusion_count <= 20 and sample_count <= 3:
+                gyro_y = gyro.y if hasattr(gyro, 'y') else 'N/A'
+                gyro_z = gyro.z if hasattr(gyro, 'z') else 'N/A'
+                print(f"[IMU] Sample #{sample_count}: X={gyro_x:.3f}, Y={gyro_y}, Z={gyro_z} rad/s → dtheta={np.degrees(imu_dtheta_x):.2f}°")
+
+        if sample_count == 0:
+            if self._imu_fusion_count <= 5:
+                print(f"[IMU] No valid gyro samples in buffer!")
+            return depth_pose
+
+        # Fuse integrated IMU rotation with ICP estimate
+        fused_theta = self.imu_alpha * total_imu_dtheta + (1 - self.imu_alpha) * depth_pose.theta
+
+        if self._imu_fusion_count <= 20:
+            print(f"[IMU] Integrated {sample_count} samples: total_rotation={np.degrees(total_imu_dtheta):.2f}°")
+            print(f"[IMU] Fusion: {self.imu_alpha:.1f}*IMU({np.degrees(total_imu_dtheta):.2f}°) + {1-self.imu_alpha:.1f}*ICP({np.degrees(depth_pose.theta):.2f}°) = {np.degrees(fused_theta):.2f}°")
+
+        return RobotPose(depth_pose.x, depth_pose.y, fused_theta)
 
     def update_pose(self, delta_pose: RobotPose) -> RobotPose:
         """
@@ -330,6 +408,14 @@ class DepthOdometry:
         self.prev_pose.x += delta_pose.x * cos_theta - delta_pose.y * sin_theta
         self.prev_pose.y += delta_pose.x * sin_theta + delta_pose.y * cos_theta
         self.prev_pose.theta += delta_pose.theta
+
+        # Diagnostic logging for pose accumulation
+        if not hasattr(self, '_pose_log_count'):
+            self._pose_log_count = 0
+        self._pose_log_count += 1
+
+        if self._pose_log_count % 10 == 0:
+            print(f"[ODOM] Cumulative pose: x={self.prev_pose.x:.3f}m, y={self.prev_pose.y:.3f}m, theta={np.degrees(self.prev_pose.theta):.1f}deg")
 
         return self.prev_pose
 

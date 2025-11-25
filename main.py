@@ -19,6 +19,7 @@ from src.camera.oakd_camera import OakDCamera
 from src.slam.slam_engine import SLAMEngine
 from src.slam.exploration_planner import ExplorationPlanner
 from src.slam.obstacle_avoidance import ObstacleAvoidance
+from src.slam.map_overlay_visualizer import MapOverlayVisualizer
 from src.motor_control.arduino_interface import ArduinoInterface
 from src.motor_control.motion_planner import MotionPlanner
 from src.motor_control.path_planner import PathPlanner
@@ -98,7 +99,11 @@ class LukeBot:
         # Obstacle avoidance
         self.logger.info("Initializing obstacle avoidance...")
         self.obstacle_avoidance = ObstacleAvoidance(config=slam_config)
-        
+
+        # Map overlay visualizer
+        self.logger.info("Initializing map overlay visualizer...")
+        self.map_overlay_viz = MapOverlayVisualizer(config=slam_config)
+
         # Control flags
         self.running = False
         self.paused = False
@@ -106,6 +111,14 @@ class LukeBot:
         self.current_path = None
         self.current_waypoint_index = 0
         self.exploration_target = None
+
+        # Visualization modes
+        # 0: Normal view (panoramic with detections)
+        # 1: SLAM debug view (features, tracking, depth)
+        # 2: Side-by-side (panoramic vs SLAM)
+        # 3: Multi-panel debug view (4 panels)
+        # 4: Map view (top-down occupancy grid with robot and trajectory)
+        self.visualization_mode = 0
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -207,21 +220,90 @@ class LukeBot:
                 
                 if pose is not None:
                     self.logger.debug(f"Pose: x={pose.x:.2f}, y={pose.y:.2f}, theta={pose.theta:.2f}")
-                    
+
                     # Autonomous exploration mode
                     if self.autonomous_mode:
                         self._autonomous_exploration(pose, data['rgb'])
-                
-                # Prepare display frame
-                # Draw detections first
-                frame_with_detections = self.camera.draw_detections(data['rgb'], data['detections'])
 
-                if self.use_panoramic_view:
-                    # Create panoramic view using built-in camera stitching
-                    frame = self.camera.create_panoramic_view(frame_with_detections, add_labels=True)
-                else:
-                    # Regular single camera view
-                    frame = frame_with_detections
+                # Prepare display frame based on visualization mode
+                frame = None
+                window_title = "LukeBot"
+
+                if self.visualization_mode == 0:
+                    # Mode 0: Normal view (panoramic with detections)
+                    frame_with_detections = self.camera.draw_detections(data['rgb'], data['detections'])
+
+                    if self.use_panoramic_view:
+                        frame = self.camera.create_panoramic_view(frame_with_detections, add_labels=True)
+                    else:
+                        frame = frame_with_detections
+
+                    window_title = "LukeBot - Camera Feed"
+
+                elif self.visualization_mode == 1:
+                    # Mode 1: SLAM debug view (features, tracking, depth)
+                    camera_matrix = self.camera.get_camera_intrinsics()
+                    frame = self.slam.get_slam_annotated_view(camera_matrix)
+
+                    if frame is None:
+                        frame = data['rgb'].copy()
+
+                    window_title = "LukeBot - SLAM Debug View"
+
+                elif self.visualization_mode == 2:
+                    # Mode 2: Side-by-side (panoramic vs SLAM)
+                    # Left: Panoramic view
+                    frame_with_detections = self.camera.draw_detections(data['rgb'], data['detections'])
+                    panoramic_view = self.camera.create_panoramic_view(frame_with_detections, add_labels=True)
+
+                    # Right: SLAM annotated view
+                    camera_matrix = self.camera.get_camera_intrinsics()
+                    slam_view = self.slam.get_slam_annotated_view(camera_matrix)
+
+                    if slam_view is None:
+                        slam_view = data['rgb'].copy()
+
+                    # Create side-by-side view
+                    frame = self.slam.visualizer.create_side_by_side_view(
+                        panoramic_view,
+                        slam_view,
+                        title_left="Panoramic View (Reality)",
+                        title_right="SLAM View (What SLAM Sees)"
+                    )
+
+                    window_title = "LukeBot - Reality vs SLAM"
+
+                elif self.visualization_mode == 3:
+                    # Mode 3: Multi-panel debug view (4 panels)
+                    camera_matrix = self.camera.get_camera_intrinsics()
+                    frame = self.slam.get_multi_panel_debug_view(camera_matrix)
+
+                    if frame is None:
+                        frame = data['rgb'].copy()
+
+                    window_title = "LukeBot - Multi-Panel Debug"
+
+                elif self.visualization_mode == 4:
+                    # Mode 4: Top-down map view with robot and trajectory
+                    occupancy_grid = self.slam.map_builder.occupancy_grid
+                    grid_origin = self.slam.map_builder.grid_origin
+                    grid_resolution = self.slam.map_builder.grid_resolution
+                    trajectory = self.slam.map_builder.trajectory
+
+                    frame = self.map_overlay_viz.create_map_view(
+                        occupancy_grid,
+                        pose,
+                        grid_origin,
+                        grid_resolution,
+                        trajectory=trajectory,
+                        show_grid=True,
+                        show_scale=True
+                    )
+
+                    window_title = "LukeBot - Map View"
+
+                if frame is None:
+                    continue
 
                 # Display FPS
                 frame_count += 1
@@ -234,19 +316,32 @@ class LukeBot:
                 cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # Display pose
-                if pose is not None:
+                # Display pose and odometry source (for modes 0 and 1)
+                if self.visualization_mode in [0, 1] and pose is not None:
                     pose_text = f"Pose: ({pose.x:.2f}, {pose.y:.2f}, {np.degrees(pose.theta):.1f}°)"
                     cv2.putText(frame, pose_text, (10, 60),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
+                    # Display odometry source
+                    odom_source = self.slam.get_odometry_source()
+                    odom_color = (0, 255, 255) if odom_source == "depth" else (255, 0, 255)  # Cyan for depth, Magenta for visual
+                    cv2.putText(frame, f"Odometry: {odom_source.upper()}", (10, 90),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, odom_color, 2)
+
                 # Display mode indicator
-                mode_text = "PANORAMIC VIEW (~105° FOV)" if self.use_panoramic_view else "SINGLE CAMERA (69° FOV)"
+                mode_names = [
+                    "NORMAL VIEW",
+                    "SLAM DEBUG",
+                    "SIDE-BY-SIDE",
+                    "MULTI-PANEL",
+                    "MAP VIEW"
+                ]
+                mode_text = f"Mode: {mode_names[self.visualization_mode]} (Press 'm' to change)"
                 cv2.putText(frame, mode_text, (10, frame.shape[0] - 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
                 # Display frame
-                cv2.imshow("LukeBot - Camera Feed", frame)
+                cv2.imshow(window_title, frame)
                 
                 # Handle keyboard input
                 key = cv2.waitKey(1) & 0xFF
@@ -257,17 +352,32 @@ class LukeBot:
                     self.paused = not self.paused
                     self.logger.info(f"Paused: {self.paused}")
                 elif key == ord('w'):
-                    # Move forward
-                    self.motion_planner.move_forward(25)
+                    # Move forward (slow but enough torque)
+                    self.motion_planner.move_forward(20)
                 elif key == ord('s'):
-                    # Move backward
-                    self.motion_planner.move_backward(25)
+                    # Move backward (slow but enough torque)
+                    self.motion_planner.move_backward(20)
                 elif key == ord('a'):
-                    # Turn left
-                    self.motion_planner.turn_left(45.0)
+                    # Turn left (continuous until space pressed)
+                    self.motion_planner.turn_left(2.0)
                 elif key == ord('d'):
-                    # Turn right
-                    self.motion_planner.turn_right(45.0)
+                    # Turn right (continuous until space pressed)
+                    self.motion_planner.turn_right(2.0)
+                elif key == ord('t'):
+                    # TEST: Controlled slow turn with auto-stop for IMU testing
+                    print("[TEST] Starting controlled turn (3 seconds at speed=25)...")
+                    self.motion_planner.turn_left(45.0, speed=25)
+                    # Note: 'time' module is already imported at top of file
+                    cv2.waitKey(3000)  # Wait 3 seconds (using cv2.waitKey instead of time.sleep to keep UI responsive)
+                    self.motion_planner.stop()
+                    print("[TEST] Turn complete, motors stopped")
+                elif key == ord('r'):
+                    # TEST: LONG rotation test for IMU integration
+                    print("[TEST] Starting LONG rotation test (10 seconds at speed=25)...")
+                    self.motion_planner.turn_left(360.0, speed=25)
+                    cv2.waitKey(10000)  # Wait 10 seconds
+                    self.motion_planner.stop()
+                    print("[TEST] Long rotation complete, motors stopped")
                 elif key == ord(' '):
                     # Stop
                     self.motion_planner.stop()
@@ -283,6 +393,27 @@ class LukeBot:
                     self.use_panoramic_view = not self.use_panoramic_view
                     self.logger.info(f"Panoramic view: {self.use_panoramic_view}")
                     print(f"View mode: {'PANORAMIC (~105° FOV)' if self.use_panoramic_view else 'SINGLE CAMERA (69° FOV)'}")
+                elif key == ord('m'):
+                    # Cycle through visualization modes
+                    self.visualization_mode = (self.visualization_mode + 1) % 5
+                    mode_names = ["NORMAL VIEW", "SLAM DEBUG", "SIDE-BY-SIDE", "MULTI-PANEL", "MAP VIEW"]
+                    self.logger.info(f"Visualization mode: {mode_names[self.visualization_mode]}")
+                    print(f"Visualization mode: {mode_names[self.visualization_mode]}")
+                    # Close old window to prevent multiple windows
+                    cv2.destroyAllWindows()
+                elif key == ord('o'):
+                    # Toggle odometry mode for debugging
+                    current_mode = self.slam.odometry_mode
+                    if current_mode == 'hybrid':
+                        self.slam.odometry_mode = 'visual'
+                        print("Odometry: VISUAL-ONLY (faster, for testing)")
+                    elif current_mode == 'visual':
+                        self.slam.odometry_mode = 'depth'
+                        print("Odometry: DEPTH-ONLY")
+                    else:
+                        self.slam.odometry_mode = 'hybrid'
+                        print("Odometry: HYBRID (depth + visual fallback)")
+                    self.logger.info(f"Odometry mode: {self.slam.odometry_mode}")
 
                 time.sleep(0.05)  # Increased from 0.01 to 0.05 to reduce loop rate
         
@@ -346,7 +477,7 @@ class LukeBot:
 
             # Randomly turn left or right to explore better
             turn_direction = random.choice(['left', 'right'])
-            turn_angle = random.randint(60, 120)  # Random turn between 60-120 degrees
+            turn_angle = random.randint(5, 10)  # Random turn between 5-10 degrees (extremely slow)
 
             if turn_direction == 'left':
                 self.motion_planner.turn_left(turn_angle)
@@ -357,9 +488,9 @@ class LukeBot:
             self.motion_planner.stop()
             time.sleep(0.3)
         else:
-            # Move forward slowly
+            # Move forward slowly but with enough torque for feature tracking
             self.logger.debug("Path clear, moving forward")
-            self.motion_planner.move_forward(15)
+            self.motion_planner.move_forward(20)  # Slow but enough torque to move
             time.sleep(1.5)
             self.motion_planner.stop()
             time.sleep(0.3)
@@ -375,11 +506,27 @@ def main():
     print("  p - Pause/Resume")
     print("  w - Move forward")
     print("  s - Move backward")
-    print("  a - Turn left")
-    print("  d - Turn right")
+    print("  a - Turn left (continuous, press Space to stop)")
+    print("  d - Turn right (continuous, press Space to stop)")
+    print("  t - TEST: Controlled 3-second left turn (for IMU testing)")
+    print("  r - TEST: Long 10-second rotation (for IMU integration testing)")
     print("  Space - Stop")
     print("  e - Toggle autonomous exploration mode")
     print("  v - Toggle panoramic view (105° FOV)")
+    print("  m - Cycle visualization modes (Normal/SLAM/Side-by-Side/Multi-Panel)")
+    print("  o - Toggle odometry mode (Hybrid/Visual/Depth)")
+    print("=" * 50)
+    print("\nVisualization Modes:")
+    print("  0: Normal view - Panoramic camera with detections")
+    print("  1: SLAM debug - Features, tracking, and depth overlay")
+    print("  2: Side-by-side - Panoramic (left) vs SLAM view (right)")
+    print("  3: Multi-panel - 4-panel debug view with all visualizations")
+    print("  4: Map view - Top-down occupancy grid with robot and trajectory")
+    print("=" * 50)
+    print("\nOdometry Modes:")
+    print("  Hybrid: Depth ICP + Visual fallback (default)")
+    print("  Visual: Feature-based only (faster for testing)")
+    print("  Depth: ICP-based only")
     print("=" * 50)
     
     robot = LukeBot()

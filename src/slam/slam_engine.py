@@ -71,6 +71,9 @@ class SLAMEngine:
         self.visual_consecutive_failures = 0
         self.hysteresis_threshold = 3  # Require 3 consecutive failures before switching modes
         self.preferred_mode = "depth" if self.odometry_mode == "hybrid" else self.odometry_mode
+
+        # IMU buffer for continuous integration between keyframes
+        self.imu_buffer = []
     
     def set_camera_intrinsics(self, camera_matrix, dist_coeffs=None):
         """Set camera intrinsics for visual and depth odometry."""
@@ -96,6 +99,14 @@ class SLAMEngine:
         self.last_rgb_frame = rgb_image
         self.last_depth_frame = depth_image
 
+        # Buffer IMU data even for skipped frames (for continuous integration)
+        # Note: imu_data is now a list of samples from camera, extend to add all samples
+        if imu_data is not None:
+            if isinstance(imu_data, list):
+                self.imu_buffer.extend(imu_data)
+            else:
+                self.imu_buffer.append(imu_data)
+
         # Check if we should process this frame
         frames_since_last = self.frame_count - self.last_processed_frame
         if frames_since_last < self.keyframe_interval:
@@ -113,7 +124,7 @@ class SLAMEngine:
             if self.odometry_mode == 'depth':
                 # Depth-only mode
                 if depth_image is not None:
-                    delta_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, imu_data)
+                    delta_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, self.imu_buffer)
                     odometry_source = "depth"
 
             elif self.odometry_mode == 'visual':
@@ -124,7 +135,7 @@ class SLAMEngine:
             elif self.odometry_mode == 'hybrid':
                 # Hybrid mode with hysteresis: Try preferred mode first, switch only after consecutive failures
                 if self.preferred_mode == "depth" and depth_image is not None:
-                    depth_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, imu_data)
+                    depth_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, self.imu_buffer)
                     if depth_pose is not None:
                         delta_pose = depth_pose
                         odometry_source = "depth"
@@ -170,7 +181,7 @@ class SLAMEngine:
                             self.logger.warning(f"Switching preferred mode from visual to depth after {self.visual_consecutive_failures} consecutive failures")
                             self.preferred_mode = "depth"
                             # Try depth as fallback this frame
-                            depth_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, imu_data)
+                            depth_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, self.imu_buffer)
                             if depth_pose is not None:
                                 delta_pose = depth_pose
                                 odometry_source = "depth"
@@ -179,7 +190,7 @@ class SLAMEngine:
                         else:
                             # Still within hysteresis threshold, try depth as temporary fallback
                             if depth_image is not None:
-                                depth_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, imu_data)
+                                depth_pose = self.depth_odometry.estimate_pose(depth_image, rgb_image, self.imu_buffer)
                                 if depth_pose is not None:
                                     delta_pose = depth_pose
                                     odometry_source = "depth (temp)"  # Indicate temporary fallback
@@ -214,6 +225,9 @@ class SLAMEngine:
 
                 # Auto-save map if needed
                 self.map_builder.auto_save_if_needed()
+
+            # Clear IMU buffer after processing keyframe
+            self.imu_buffer = []
 
             self.last_processed_frame = self.frame_count
             return self.current_pose

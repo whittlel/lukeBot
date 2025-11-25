@@ -29,15 +29,38 @@ class VisualOdometry:
         
         # Initialize feature detector
         if self.detector_type == 'ORB':
-            self.detector = cv2.ORB_create(nfeatures=self.max_features)
+            # Create ORB with balanced parameters for good feature detection
+            self.detector = cv2.ORB_create(
+                nfeatures=self.max_features,
+                scaleFactor=1.2,           # Pyramid decimation ratio
+                nlevels=8,                  # Number of pyramid levels
+                edgeThreshold=31,           # Size of border where features are not detected
+                firstLevel=0,               # First level in pyramid
+                WTA_K=2,                    # Number of points for oriented BRIEF
+                scoreType=cv2.ORB_HARRIS_SCORE,  # Use Harris corner score (better quality)
+                patchSize=31,               # Size of patch used for BRIEF
+                fastThreshold=10            # FAST corner threshold (lower = more features)
+            )
         elif self.detector_type == 'SIFT':
-            self.detector = cv2.SIFT_create(nfeatures=self.max_features)
+            self.detector = cv2.SIFT_create(
+                nfeatures=self.max_features,
+                contrastThreshold=0.04,     # Higher = more selective
+                edgeThreshold=10            # Lower = more selective
+            )
         elif self.detector_type == 'SURF':
             # SURF is not available in opencv-python by default
-            self.detector = cv2.ORB_create(nfeatures=self.max_features)
+            self.detector = cv2.ORB_create(
+                nfeatures=self.max_features,
+                scoreType=cv2.ORB_HARRIS_SCORE,
+                fastThreshold=10
+            )
             print("[WARNING] SURF not available, using ORB instead")
         else:
-            self.detector = cv2.ORB_create(nfeatures=self.max_features)
+            self.detector = cv2.ORB_create(
+                nfeatures=self.max_features,
+                scoreType=cv2.ORB_HARRIS_SCORE,
+                fastThreshold=10
+            )
         
         # Feature matcher settings
         self.matcher_type = vo_config.get('matcher_type', 'BF')

@@ -86,7 +86,7 @@ class OakDCamera:
         self.frame_queue = queue.Queue(maxsize=2)
         self.detection_queue = queue.Queue(maxsize=2)
         self.depth_queue = queue.Queue(maxsize=2)
-        self.imu_queue = queue.Queue(maxsize=2)
+        self.imu_queue = queue.Queue(maxsize=500)  # Large buffer for continuous IMU integration
         self.left_queue = queue.Queue(maxsize=2)
         self.right_queue = queue.Queue(maxsize=2)
         
@@ -242,11 +242,11 @@ class OakDCamera:
         # Add IMU node if enabled
         if self.enable_imu:
             imu = pipeline.create(dai.node.IMU)
-            imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW, 
+            imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW,
                                 dai.IMUSensor.GYROSCOPE_RAW,
-                                dai.IMUSensor.MAGNETOMETER_RAW], 400)
-            imu.setBatchReportThreshold(1)
-            imu.setMaxBatchReports(10)
+                                dai.IMUSensor.MAGNETOMETER_RAW], 100)  # 100 Hz = good balance of accuracy and bandwidth
+            imu.setBatchReportThreshold(10)  # Smaller batches = more resilient to interruptions
+            imu.setMaxBatchReports(200)  # Allow buffering many IMU packets for continuous integration
             
             xout_imu = pipeline.create(dai.node.XLinkOut)
             xout_imu.setStreamName("imu")
@@ -271,7 +271,7 @@ class OakDCamera:
             self.q_right = self.device.getOutputQueue(name="right", maxSize=4, blocking=False)
             
             if self.enable_imu:
-                self.q_imu = self.device.getOutputQueue(name="imu", maxSize=4, blocking=False)
+                self.q_imu = self.device.getOutputQueue(name="imu", maxSize=100, blocking=False)
             else:
                 self.q_imu = None
             
@@ -364,24 +364,27 @@ class OakDCamera:
                     if in_right is not None:
                         right_frame = in_right.getCvFrame()
 
-                    # Get IMU data
-                    imu_data = None
+                    # Get ALL accumulated IMU data (drain the entire queue for continuous integration)
+                    imu_data_list = []
                     if self.q_imu is not None:
-                        in_imu = self.q_imu.tryGet()
-                        if in_imu is not None:
+                        # Drain all batches from DepthAI IMU queue
+                        while True:
+                            in_imu = self.q_imu.tryGet()
+                            if in_imu is None:
+                                break
+
                             # IMU data comes as IMUData object with packets attribute
                             try:
                                 imu_packets = in_imu.packets
                                 if imu_packets and len(imu_packets) > 0:
-                                    imu_data = {
-                                        'accel': None,
-                                        'gyro': None,
-                                        'mag': None,
-                                        'timestamp': None
-                                    }
-                                    # Iterate through all packets to find different sensor types
-                                    # Each packet may contain different sensor data
+                                    # Iterate through all packets in this batch
                                     for imu_packet in imu_packets:
+                                        imu_data = {
+                                            'accel': None,
+                                            'gyro': None,
+                                            'mag': None,
+                                            'timestamp': None
+                                        }
                                         # Check if packet has accelerometer data
                                         if hasattr(imu_packet, 'acceleroMeter'):
                                             imu_data['accel'] = imu_packet.acceleroMeter
@@ -393,13 +396,13 @@ class OakDCamera:
                                         # Check if packet has magnetometer data
                                         if hasattr(imu_packet, 'magneticField'):
                                             imu_data['mag'] = imu_packet.magneticField
-                                    
-                                    # If no data found, set to None
-                                    if imu_data['accel'] is None and imu_data['gyro'] is None and imu_data['mag'] is None:
-                                        imu_data = None
+
+                                        # Only add if we found sensor data
+                                        if imu_data['gyro'] is not None:
+                                            imu_data_list.append(imu_data)
                             except (AttributeError, TypeError) as e:
-                                # Skip IMU data if we can't parse it
-                                imu_data = None
+                                # Skip this batch if we can't parse it
+                                pass
                     
                     # Update FPS
                     self.frame_count += 1
@@ -437,14 +440,17 @@ class OakDCamera:
                         except:
                             pass
                     
-                    try:
-                        self.imu_queue.put_nowait(imu_data)
-                    except queue.Full:
+                    # Put all IMU samples into queue
+                    for imu_data in imu_data_list:
                         try:
-                            self.imu_queue.get_nowait()
                             self.imu_queue.put_nowait(imu_data)
-                        except:
-                            pass
+                        except queue.Full:
+                            # Queue full - skip oldest and add new
+                            try:
+                                self.imu_queue.get_nowait()
+                                self.imu_queue.put_nowait(imu_data)
+                            except:
+                                pass
 
                     try:
                         self.left_queue.put_nowait(left_frame)
@@ -508,11 +514,18 @@ class OakDCamera:
             return None
     
     def get_imu_data(self):
-        """Get latest IMU data."""
+        """Get all accumulated IMU data since last call (for continuous integration)."""
+        samples = []
         try:
-            return self.imu_queue.get_nowait()
+            # Drain the entire queue to get ALL IMU samples
+            while True:
+                sample = self.imu_queue.get_nowait()
+                samples.append(sample)
         except queue.Empty:
-            return None
+            pass
+
+        # Return list of samples (empty list if no samples available)
+        return samples if samples else None
     
     def get_camera_intrinsics(self):
         """Get camera intrinsics matrix."""
